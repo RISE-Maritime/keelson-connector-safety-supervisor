@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "keelson-connector-safety-supervisor"
+version = "0.1.0"
+description = "The onboard safety supervisor: emergency_request -> safety_state, the processed-request ledger and the local lockout (keelson protocols/emergency_request.yaml)."
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+    # EXACT pin, never a path or a range. The types (EmergencyRequest, SafetyState,
+    # SafetyRequestResult) exist only on keelson PR #332; this is that PR's alpha build, tracked by
+    # crowsnest-dev #82. Repin to the release that carries #332 when it merges.
+    # PENDING: the alpha has not been cut yet; until it is, develop against the #332 worktree's SDK
+    # in a local venv (README, "Developing before the alpha").
+    "keelson==0.6.0a332.dev1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==8.3.4", "ruff==0.14.11"]
+
+[tool.setuptools]
+packages = ["safety_supervisor"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["e2e: end-to-end test that runs the CLI against an isolated in-process Zenoh peer"]
+
+[tool.ruff]
+line-length = 140

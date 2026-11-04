@@ -1,0 +1,15 @@
+# The onboard safety supervisor. Its OWN process and Zenoh session; the store on a persistent volume.
+# Independence level L1: it shares the router and the box with what it protects (README).
+services:
+  safety-supervisor:
+    image: ghcr.io/rise-maritime/keelson-connector-safety-supervisor:latest
+    container_name: safety-supervisor
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - safety-state:/state
+      - ./config/policy.json:/config/policy.json:ro
+    command: "safety-supervisor2keelson --log-level 20 -r rise -e <vessel_id> --state-dir /state --policy /config/policy.json"
+
+volumes:
+  safety-state:

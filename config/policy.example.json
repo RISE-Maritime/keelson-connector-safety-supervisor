@@ -1,0 +1,8 @@
+{
+  "config_revision": 1,
+  "command_profile": "test",
+  "safety_trip": { "allow": ["*@*"], "deny": [] },
+  "manager": { "issuer_id": "authority-manager/0", "source_id": "authority-manager" },
+  "conn_ttl_s": 30,
+  "trust_roots": []
+}
