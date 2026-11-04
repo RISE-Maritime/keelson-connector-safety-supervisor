@@ -442,3 +442,31 @@ def test_a_released_latch_after_a_reset_is_no_alarm():
     t.vessel_latch(False)  # armed after the RESET: allowed
     t.run_once()
     assert inner.calls == 1 and alarms == []
+
+
+# ---------------------------------------------------------------------------- the retained-request poll (HIL #86)
+
+
+def test_a_retained_request_missed_live_is_processed_by_the_poll(tmp_path):
+    sup, _, bus, _ = _clear(tmp_path)
+    r = sup.handle_retained(stop("missed-live"))
+    assert r.outcome == O.SAFETY_REQUEST_OUTCOME_ACCEPTED and sup.state.state == S.SAFETY_STATE_STOPPED
+    assert bus.results[-1].request_id == "missed-live"
+
+
+def test_the_poll_does_not_republish_what_is_answered_and_published(tmp_path):
+    sup, _, bus, _ = _clear(tmp_path)
+    sup.handle_request(stop("s1"))
+    n = len(bus.results)
+    assert sup.handle_retained(stop("s1")) is None and len(bus.results) == n
+
+
+def test_the_poll_republishes_a_result_that_was_never_published(tmp_path):
+    bus = Bus(fail_results=True)
+    sup, *_ = make(tmp_path, bus=bus, recover="eng")
+    with pytest.raises(RuntimeError):
+        sup.handle_request(stop("s1"))
+    bus.fail_results = False
+    gen = sup.state.fence.generation
+    sup.handle_retained(stop("s1"))
+    assert [r.request_id for r in bus.results] == ["s1"] and sup.state.fence.generation == gen  # republished, not re-executed

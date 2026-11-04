@@ -111,6 +111,14 @@ what it protects (§3.4). Nothing here claims more.
 | `…/command_authority/{vessel}` (the conn lease; test and legacy profiles) | liveliness: source + `safety_state`, `safety_processed_request` |
 | the authority manager's source liveliness token | |
 
+**The retained requests are read back every `--retained-poll-s`** (default 5 s), not only at boot.
+A supervisor cut off by a partition, alive and not restarted, never hears a STOP published during the
+partition; the storage keeps it, and the poll answers it once the link heals. The HIL suite found
+this (crowsnest-dev #86). A request already answered and published is skipped, so old results are
+not republished every period. **The anti-replay retention (`--retention-days`) must outlast how
+long the storage keeps a request.** A request still retained after its ledger row was collected
+would be executed again: a STOP would land again, and a RESET would be refused as stale.
+
 The retained requests need a **persistent** router storage on `emergency_request/**`. A `memory`
 storage does not answer wildcard queries, so a STOP published while the supervisor was down would
 never be seen (protocol `not_solved`).

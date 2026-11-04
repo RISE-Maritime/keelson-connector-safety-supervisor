@@ -63,6 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--heartbeat-s", type=float, default=5.0, help="safety_state heartbeat period (default 5 s)")
     p.add_argument("--retention-days", type=float, default=7.0, help="ledger anti-replay retention (default 7 days)")
     p.add_argument("--boot-get-timeout-s", type=float, default=5.0, help="timeout of the boot GET of retained requests")
+    p.add_argument("--retained-poll-s", type=float, default=5.0,
+                   help="re-read the retained requests this often: a STOP published while partitioned still lands (default 5 s)")
     return p
 
 
@@ -189,7 +191,7 @@ def main() -> int:
 
         with declare_liveliness(session, realm, vessel, args.source_id, pubsub_subjects=["safety_state", "safety_processed_request"]), \
                 GracefulShutdown() as shutdown:
-            last_hb = last_gc = time.monotonic()
+            last_hb = last_gc = last_poll = time.monotonic()
             while not shutdown.is_requested():
                 try:
                     kind, sample = events.get(timeout=0.25)
@@ -198,6 +200,8 @@ def main() -> int:
                 try:
                     if kind == "request":
                         sup.handle_request(codec.request_from_pb(_decode(sample, EmergencyRequest)))
+                    elif kind == "retained":
+                        sup.handle_retained(codec.request_from_pb(_decode(sample, EmergencyRequest)))
                     elif kind == "assignment":
                         projections.on_command_assignment(_decode(sample, CommandAssignment), policy)
                     elif kind == "conn":
@@ -220,6 +224,16 @@ def main() -> int:
                 if now - last_hb >= args.heartbeat_s:
                     sup.heartbeat()
                     last_hb = now
+                # HIL #86 found it: the boot GET alone misses a STOP published while this process was
+                # partitioned but alive -- its live publish was never heard. Storage keeps it; read it back.
+                if now - last_poll >= args.retained_poll_s:
+                    last_poll = now
+                    try:
+                        for reply in session.get(keys["requests"], timeout=1.0):
+                            if reply.ok is not None:
+                                events.put(("retained", reply.ok))
+                    except Exception:  # pylint: disable=broad-except
+                        log.exception("the retained-request poll failed")
                 if now - last_gc >= 3600:
                     sup.gc(int(args.retention_days * 86_400_000))
                     last_gc = now

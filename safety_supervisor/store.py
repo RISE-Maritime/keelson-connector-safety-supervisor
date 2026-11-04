@@ -107,6 +107,10 @@ class Store:
         rows = self.db.execute("SELECT result FROM ledger WHERE published = 0 ORDER BY processed_ms").fetchall()
         return [codec.result_from_json(json.loads(r[0])) for r in rows]
 
+    def is_published(self, request_id: str) -> bool:
+        row = self.db.execute("SELECT published FROM ledger WHERE request_id = ?", (request_id,)).fetchone()
+        return bool(row and row[0])
+
     def mark_published(self, request_id: str) -> None:
         self.db.execute("UPDATE ledger SET published = 1 WHERE request_id = ?", (request_id,))
 

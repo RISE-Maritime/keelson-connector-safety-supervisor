@@ -90,6 +90,15 @@ class Supervisor:
                  req.controller_id, model.O.Name(result.outcome))
         return result
 
+    def handle_retained(self, req: Request) -> Result | None:
+        """A request read back from storage by the periodic poll. One already answered AND published
+        is skipped silently: the poll must not republish every old result every period. Anything
+        else goes through `handle_request`, so the ledger still decides (an unpublished result is
+        republished; an unknown request is processed once)."""
+        if req.request_id and self.store.is_published(req.request_id):
+            return None
+        return self.handle_request(req)
+
     def handle_requests(self, requests: Iterable[Request]) -> None:
         """Retained requests at boot, in any order: a STOP always lands; a RESET is judged against
         the current fence like any other (flow boot_and_multi_crash_recovery)."""
