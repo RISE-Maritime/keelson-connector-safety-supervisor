@@ -33,6 +33,7 @@ from safety_supervisor.actuation import LoggingActuator, SlipwayLifecycleActuato
 from safety_supervisor.inputs import NoInputs, SimulatedInputs, TruthInputs
 from safety_supervisor.policy import resolve
 from safety_supervisor.projection import Projections
+from safety_supervisor.retained import RetainedPoll
 from safety_supervisor.service import Supervisor
 from safety_supervisor.store import Store
 
@@ -61,7 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--slipway-responder-id", default="sim", help="the Slipway vessel's vehicle_lifecycle/v1 responder (default sim)")
     p.add_argument("--actuator-timeout-s", type=float, default=2.0, help="timeout of one actuator call")
     p.add_argument("--heartbeat-s", type=float, default=5.0, help="safety_state heartbeat period (default 5 s)")
-    p.add_argument("--retention-days", type=float, default=7.0, help="ledger anti-replay retention (default 7 days)")
+    p.add_argument("--retention-days", type=float, default=0.0,
+                   help="ledger anti-replay retention; 0 (the default) never collects -- storage keeps every request (README)")
     p.add_argument("--boot-get-timeout-s", type=float, default=5.0, help="timeout of the boot GET of retained requests")
     p.add_argument("--retained-poll-s", type=float, default=5.0,
                    help="re-read the retained requests this often: a STOP published while partitioned still lands (default 5 s)")
@@ -189,9 +191,17 @@ def main() -> int:
                 retained += 1
         log.info("boot: %d retained request(s) queued", retained)
 
+        # HIL #86 found it: the boot GET alone misses a STOP published while this process was partitioned
+        # but alive. Storage keeps it; this reads it back -- on its own thread, enqueuing only (review A2).
+        def retained_get():
+            return [r.ok for r in session.get(keys["requests"], timeout=1.0) if r.ok is not None]
+
+        poll = RetainedPoll(retained_get, lambda s: events.put(("retained", s)),
+                            lambda s: _decode(s, EmergencyRequest).request_id, period_s=args.retained_poll_s).start()
+
         with declare_liveliness(session, realm, vessel, args.source_id, pubsub_subjects=["safety_state", "safety_processed_request"]), \
                 GracefulShutdown() as shutdown:
-            last_hb = last_gc = last_poll = time.monotonic()
+            last_hb = last_gc = time.monotonic()
             while not shutdown.is_requested():
                 try:
                     kind, sample = events.get(timeout=0.25)
@@ -201,7 +211,10 @@ def main() -> int:
                     if kind == "request":
                         sup.handle_request(codec.request_from_pb(_decode(sample, EmergencyRequest)))
                     elif kind == "retained":
-                        sup.handle_retained(codec.request_from_pb(_decode(sample, EmergencyRequest)))
+                        req = codec.request_from_pb(_decode(sample, EmergencyRequest))
+                        sup.handle_retained(req)
+                        if req.request_id and store.is_published(req.request_id):
+                            poll.mark_published(req.request_id)
                     elif kind == "assignment":
                         projections.on_command_assignment(_decode(sample, CommandAssignment), policy)
                     elif kind == "conn":
@@ -224,19 +237,10 @@ def main() -> int:
                 if now - last_hb >= args.heartbeat_s:
                     sup.heartbeat()
                     last_hb = now
-                # HIL #86 found it: the boot GET alone misses a STOP published while this process was
-                # partitioned but alive -- its live publish was never heard. Storage keeps it; read it back.
-                if now - last_poll >= args.retained_poll_s:
-                    last_poll = now
-                    try:
-                        for reply in session.get(keys["requests"], timeout=1.0):
-                            if reply.ok is not None:
-                                events.put(("retained", reply.ok))
-                    except Exception:  # pylint: disable=broad-except
-                        log.exception("the retained-request poll failed")
                 if now - last_gc >= 3600:
                     sup.gc(int(args.retention_days * 86_400_000))
                     last_gc = now
+        poll.close()
         if isinstance(actuator, ThreadedActuator):
             actuator.close()  # before the session it calls through is closed
         for s in subs:

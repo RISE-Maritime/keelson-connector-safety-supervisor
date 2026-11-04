@@ -114,10 +114,17 @@ what it protects (§3.4). Nothing here claims more.
 **The retained requests are read back every `--retained-poll-s`** (default 5 s), not only at boot.
 A supervisor cut off by a partition, alive and not restarted, never hears a STOP published during the
 partition; the storage keeps it, and the poll answers it once the link heals. The HIL suite found
-this (crowsnest-dev #86). A request already answered and published is skipped, so old results are
-not republished every period. **The anti-replay retention (`--retention-days`) must outlast how
-long the storage keeps a request.** A request still retained after its ledger row was collected
-would be executed again: a STOP would land again, and a RESET would be refused as stale.
+this (crowsnest-dev #86). Ted and I reviewed it on 2026-11-04 and settled these points:
+- **Off the decision loop.** The GET runs on its own thread and only enqueues, so a slow router
+  cannot delay a live STOP.
+- **No growing load.** A request seen answered and published is never enqueued again.
+- **The ledger is never collected by default** (`--retention-days 0`). Storage keeps every request,
+  because nothing deletes an answered one yet. A ledger row collected before its request leaves
+  storage would make that request look new: a STOP from last week would execute again. Set a
+  retention only once answered requests are deleted from storage.
+- **A RESET lost in a partition can land when it heals,** minutes later. That is the protocol's
+  "any order, against the current fence": a STOP in between makes it stale, and a RESET re-arms
+  nothing, so she turns CLEAR and stays stopped until somebody arms her.
 
 The retained requests need a **persistent** router storage on `emergency_request/**`. A `memory`
 storage does not answer wildcard queries, so a STOP published while the supervisor was down would

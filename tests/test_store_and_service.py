@@ -470,3 +470,37 @@ def test_the_poll_republishes_a_result_that_was_never_published(tmp_path):
     gen = sup.state.fence.generation
     sup.handle_retained(stop("s1"))
     assert [r.request_id for r in bus.results] == ["s1"] and sup.state.fence.generation == gen  # republished, not re-executed
+
+
+# ---------------------------------------------------------------------------- the joint review of 130fd57
+
+
+def test_a_retention_of_zero_never_collects_the_ledger(tmp_path):
+    sup, store, *_ = make(tmp_path, recover="eng")
+    sup.handle_request(stop("s1"))
+    sup.now_ms = lambda: 10**12  # a long time later: any positive retention would collect it
+    assert sup.gc(0) == 0 and store.result_for("s1") is not None
+    assert sup.gc(1) == 1  # ...and a real retention does, so the test can fail
+
+
+def test_the_poll_only_enqueues_and_never_re_enqueues_what_is_published():
+    from safety_supervisor.retained import RetainedPoll
+
+    stored, queued = ["a", "b", "c"], []
+    p = RetainedPoll(lambda: stored, queued.append, lambda s: s)
+    assert p.poll_once() == 3 and queued == ["a", "b", "c"]
+    p.mark_published("a")
+    p.mark_published("b")
+    queued.clear()
+    assert p.poll_once() == 1 and queued == ["c"]
+
+
+def test_a_request_that_does_not_decode_is_still_handed_to_the_loop():
+    from safety_supervisor.retained import RetainedPoll
+
+    def bad(_):
+        raise ValueError("garbage")
+
+    queued = []
+    RetainedPoll(lambda: ["junk"], queued.append, bad).poll_once()
+    assert queued == ["junk"]  # the loop refuses it and logs; the poll does not swallow it

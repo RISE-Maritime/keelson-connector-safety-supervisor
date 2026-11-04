@@ -146,6 +146,12 @@ class Supervisor:
         self._publish_state(self.state)
 
     def gc(self, retention_ms: int) -> int:
+        """Collect published ledger rows older than the retention. `retention_ms <= 0` NEVER collects,
+        and it is the default (joint review of 130fd57, A1). Storage keeps every request until answered
+        requests are deleted from it, which nothing does yet. A ledger row collected before its request
+        leaves storage makes that request look new: a STOP from last week would execute again."""
+        if retention_ms <= 0:
+            return 0
         return self.store.gc(self.now_ms(), retention_ms)
 
     # ------------------------------------------------------------------ internals
