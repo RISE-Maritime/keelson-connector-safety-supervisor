@@ -20,6 +20,9 @@ before it is merged or run anywhere but the isolated tests.** Every commit messa
   - a legacy stop latches on the EDGE only, and a RESET clears it (README).
 - **The Slipway actuator is SIL only**: refused outside `test` and without `--sim-truth`; a release
   never calls anything.
+- **The decision loop never waits on a vessel**: actuation runs on `ThreadedActuator`'s worker.
+- **Never moving while STOPPED**: her latch released while inhibiting means she is stopped again.
+- **Simulated inputs (`--sim-truth`, `--sim-inputs`) are refused outside `test`.**
 - **One transaction.** The state and its ledger entry commit together. Publish after the commit;
   mark published after publishing; garbage-collect only published entries past the retention.
 - **Pure decisions.** `safety_supervisor/model.py` has no clock, no store and no Zenoh. Every

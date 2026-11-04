@@ -29,7 +29,7 @@ from keelson.scaffolding.signals import GracefulShutdown
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from safety_supervisor import codec
-from safety_supervisor.actuation import LoggingActuator, SlipwayLifecycleActuator
+from safety_supervisor.actuation import LoggingActuator, SlipwayLifecycleActuator, ThreadedActuator
 from safety_supervisor.inputs import NoInputs, SimulatedInputs, TruthInputs
 from safety_supervisor.policy import resolve
 from safety_supervisor.projection import Projections
@@ -103,6 +103,12 @@ def main() -> int:
     if legacy == "slipway" and truth is None:
         log.error("--legacy-observe slipway reads the truth record: it needs --sim-truth")
         return 2
+    # Review B (2026-11-04): a simulated input is a remotely writable key or a local file standing in
+    # for hardware -- a forged truth record can clear a lockout. Never outside the test profile.
+    if (args.sim_truth or args.sim_inputs) and (policy is None or policy.command_profile != "test"):
+        log.error("refusing to start: --sim-truth / --sim-inputs are for the test profile only (profile %r)",
+                  policy.command_profile if policy else None)
+        return 2
     if args.actuator == "slipway":
         refusal = SlipwayLifecycleActuator.guard(policy.command_profile if policy else None, args.sim_truth)
         if refusal:
@@ -139,8 +145,16 @@ def main() -> int:
                     return resp.result == CommandResult.COMMAND_RESULT_ACCEPTED, resp.detail or CommandResult.Name(resp.result)
                 return False, f"no answer from {args.slipway_responder_id} within {args.actuator_timeout_s} s"
 
-            actuator = SlipwayLifecycleActuator(call_emergency_stop)
-            log.warning("SIL actuator: an accepted STOP calls %s's vehicle_lifecycle/v1 emergency_stop", vessel)
+            from keelson.payloads.Alarm_pb2 import Alarm
+
+            def on_rearmed(why):
+                session.put(f"{base}/alarm/{args.source_id}", keelson.enclose(Alarm(
+                    identifier=f"{args.source_id}/rearmed-while-stopped",
+                    description=f"{vessel} was armed on the legacy path while safety_state inhibits ({why}): stopped again",
+                    category=Alarm.Category.CATEGORY_SAFETY, priority=Alarm.Priority.PRIORITY_WARNING).SerializeToString()))
+
+            actuator = ThreadedActuator(SlipwayLifecycleActuator(call_emergency_stop), on_rearmed=on_rearmed).start()
+            log.warning("SIL actuator: an accepted STOP calls %s's vehicle_lifecycle/v1 emergency_stop (off the decision loop)", vessel)
         else:
             actuator = LoggingActuator()
 
@@ -194,6 +208,8 @@ def main() -> int:
                         truth.on_truth(codec.truth_record(keelson.uncover(sample.payload.to_bytes())[2]), int(time.monotonic() * 1000))
                         if legacy == "slipway" and truth.estop() is not None:
                             sup.on_vehicle_stopped("slipway", truth.estop())
+                        if isinstance(actuator, ThreadedActuator) and truth.estop() is not None:
+                            actuator.vessel_latch(truth.estop())
                     elif kind == "armed":
                         armed = codec.vehicle_armed(keelson.uncover(sample.payload.to_bytes())[2])
                         sup.on_vehicle_stopped(legacy, not armed)
@@ -207,6 +223,8 @@ def main() -> int:
                 if now - last_gc >= 3600:
                     sup.gc(int(args.retention_days * 86_400_000))
                     last_gc = now
+        if isinstance(actuator, ThreadedActuator):
+            actuator.close()  # before the session it calls through is closed
         for s in subs:
             s.undeclare()
     store.close()

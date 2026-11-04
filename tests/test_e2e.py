@@ -274,3 +274,48 @@ def test_a_legacy_stop_while_the_supervisor_was_down_is_latched_at_boot(h):
     h.start("--sim-truth", "--legacy-observe", "slipway", "--actuator", "slipway")
     k.truth(estop=True)  # her latch engaged while we were down
     h.wait(lambda: h.states and h.states[-1].state == SafetyState.SAFETY_STATE_STOPPED, what="the latch at boot")
+
+
+# ---------------------------------------------------------------------------- review 2026-11-04: A, B, C
+
+
+def test_armed_on_the_legacy_path_while_stopped_she_is_stopped_again(h):
+    k = FakeKernel(h.session)
+    alarms = []
+    sub = h.session.declare_subscriber(f"{BASE}/alarm/**", lambda s: alarms.append(1))
+    try:
+        h.start(*SIL, "--recover-locally", "engineer-on-board")  # STOPPED after local recovery
+        h.wait(lambda: k.stops >= 1, what="the first stop")
+        k.truth(estop=True)
+        time.sleep(0.5)
+        k.truth(estop=False)  # somebody armed her directly while safety_state says STOPPED
+        h.wait(lambda: k.stops >= 2, what="her second stop")
+        h.wait(lambda: alarms, what="the alarm")
+    finally:
+        sub.undeclare()
+
+
+def test_simulated_inputs_are_refused_outside_the_test_profile(h, tmp_path):
+    policy = tmp_path / "op.json"
+    policy.write_text(json.dumps({"config_revision": 1, "command_profile": "operational",
+                                  "manager": {"issuer_id": "authority-manager/0", "source_id": "authority-manager"}}))
+    for flag in (["--sim-truth"], ["--sim-inputs", str(tmp_path / "in.json")]):
+        p = subprocess.run([sys.executable, str(ROOT / "bin/safety-supervisor2keelson.py"), "-r", REALM, "-e", V,
+                            "--state-dir", str(tmp_path / "s"), "--policy", str(policy), "--accept-policy", *flag,
+                            "--mode", "peer", "--connect", f"tcp/127.0.0.1:{h.port}"],
+                           capture_output=True, text=True, timeout=30, check=False)
+        assert p.returncode == 2 and "test profile only" in (p.stdout + p.stderr)
+
+
+def test_a_vessel_that_never_answers_does_not_delay_the_stops_state(h):
+    """No kernel serves emergency_stop: each call waits its full timeout. The STOP's result and state
+    must still be published at once."""
+    h.start(*SIL, "--recover-locally", "engineer-on-board", "--actuator-timeout-s", "3")
+    from keelson.payloads.Primitives_pb2 import TimestampedString
+
+    h.session.put(f"{BASE}/raw_json/truth", keelson.enclose(TimestampedString(value=json.dumps({"estop": False})).SerializeToString()))
+    time.sleep(0.5)
+    t0 = time.time()
+    r = h.request(EmergencyCommand.EMERGENCY_COMMAND_STOP)
+    assert r.outcome == SafetyRequestOutcome.SAFETY_REQUEST_OUTCOME_ACCEPTED
+    assert time.time() - t0 < 2.0, "the result waited on the unanswered actuator"

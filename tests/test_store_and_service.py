@@ -366,3 +366,79 @@ def test_the_heartbeat_retries_an_actuation_that_did_not_land(tmp_path):
     assert len(calls) == 2
     sup.heartbeat()
     assert len(calls) == 2
+
+
+# ---------------------------------------------------------------------------- review 2026-11-04: A and C
+
+
+class _Inner:
+    def __init__(self, answers=None):
+        from safety_supervisor.actuation import SlipwayLifecycleActuator
+
+        self.calls = 0
+        answers = list(answers or [])
+
+        def call():
+            self.calls += 1
+            return answers.pop(0) if answers else (True, "ok")
+
+        self.a = SlipwayLifecycleActuator(call)
+
+    def apply(self, inhibit, why):
+        self.a.apply(inhibit, why)
+
+    def relatch(self):
+        self.a.relatch()
+
+
+def test_the_decision_loop_never_calls_the_vessel_itself():
+    from safety_supervisor.actuation import ThreadedActuator
+
+    inner = _Inner()
+    t = ThreadedActuator(inner)
+    t.apply(True, "STOP")  # what the loop does: record, return
+    assert inner.calls == 0
+    t.run_once()  # the worker's body
+    assert inner.calls == 1
+
+
+def test_a_stop_that_did_not_land_is_retried_by_the_worker_until_it_does():
+    from safety_supervisor.actuation import ThreadedActuator
+
+    inner = _Inner([(False, "no answer"), (False, "no answer"), (True, "ok")])
+    t = ThreadedActuator(inner)
+    t.apply(True, "STOP")
+    for _ in range(5):
+        t.run_once()
+    assert inner.calls == 3  # and not again once it landed
+
+
+def test_armed_on_the_legacy_path_while_inhibiting_she_is_stopped_again_and_it_alarms():
+    from safety_supervisor.actuation import ThreadedActuator
+
+    alarms = []
+    inner = _Inner()
+    t = ThreadedActuator(inner, on_rearmed=alarms.append)
+    t.apply(True, "STOP")
+    t.run_once()
+    t.vessel_latch(True)  # her latch engaged: as it should be
+    t.run_once()
+    assert inner.calls == 1 and alarms == []
+    t.vessel_latch(False)  # somebody armed her directly
+    t.run_once()
+    assert inner.calls == 2 and alarms == ["STOP"]
+
+
+def test_a_released_latch_after_a_reset_is_no_alarm():
+    from safety_supervisor.actuation import ThreadedActuator
+
+    alarms = []
+    inner = _Inner()
+    t = ThreadedActuator(inner, on_rearmed=alarms.append)
+    t.apply(True, "STOP")
+    t.run_once()
+    t.apply(False, "RESET")
+    t.run_once()
+    t.vessel_latch(False)  # armed after the RESET: allowed
+    t.run_once()
+    assert inner.calls == 1 and alarms == []

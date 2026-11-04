@@ -54,6 +54,11 @@ Minimal, and simpler than what it protects (protocol inv. 15):
     ADR-0140). In SIL the simulator is the hardware: this is what the `operational` profile's
     hardware inhibit stands in for. Silence never releases it. The last reading stands, and a
     silent record is logged.
+
+  **Both simulated inputs are refused outside the `test` profile.** The truth record is an
+  ordinary key, so anyone who can publish on the bus can forge `lockout: false`. "No remote role
+  clears it" (I14) therefore holds here only as far as the bus is trusted. The real guarantee is
+  the operational profile's hardware inhibit.
 - **A legacy stop converges** (`--legacy-observe slipway` or `mavlink:<source_id>`). A direct
   `vehicle_lifecycle/v1 emergency_stop` is seen in the vehicle's own telemetry: her truth-record
   latch, or `vehicle_armed` going false. It latches `EXTERNAL_LEGACY_ESTOP`, with these rules:
@@ -65,10 +70,22 @@ Minimal, and simpler than what it protects (protocol inv. 15):
     unless CLEAR. After the RESET she stays stopped until somebody arms her.
   - **Nothing is added while a STOP-class cause is present**, so the stop the supervisor itself
     actuated, echoed back, never doubles.
+  - **On MAVLink every disarm is a stop.** ArduPilot's own auto-disarm after inactivity included:
+    `vehicle_armed` cannot tell an emergency stop from a routine disarm. It fails toward more
+    inhibited, and a RESET is needed before she is armed again.
+  - **CLEAR means "arming permitted", not "not physically stopped".** After a RESET she can be
+    CLEAR and still latched until somebody arms her (keelson #332's wording says so).
 - **The SIL actuator** (`--actuator slipway`): an inhibit calls her `vehicle_lifecycle/v1
   emergency_stop` on responder `sim`.
-  - It is retried at every heartbeat until a reply is ACCEPTED.
+  - **It runs on its own thread** (`ThreadedActuator`). The decision loop only records the latest
+    "inhibit wanted", so `safety_state` and every result are published without waiting on a
+    vessel that does not answer.
+  - The worker retries every second until a reply is ACCEPTED.
   - A release calls nothing: a RESET re-arms nothing.
+  - **Armed while it inhibits, she is stopped again.** Her truth record may show her latch released
+    while the supervisor inhibits; somebody armed her on the legacy path, which nothing gates yet.
+    The worker calls `emergency_stop` again and publishes an `alarm`. She is never left moving
+    while `safety_state` says STOPPED.
   - It refuses to start outside the `test` profile, or without `--sim-truth`.
 - **The command_assignment projection** (operational RESET) **fails closed** with
   REFUSED_ASSIGNMENT_PROJECTION_UNVERIFIED unless all of these hold:
