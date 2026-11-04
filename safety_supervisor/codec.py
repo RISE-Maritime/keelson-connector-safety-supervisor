@@ -102,3 +102,23 @@ def result_from_json(d: dict) -> Result:
         processed_fence=Fence(**d["processed_fence"]), processed_at_ms=d["processed_at_ms"],
         remaining_causes=tuple(Cause(**c) for c in d["remaining_causes"]), detail=d["detail"],
     )
+
+
+def truth_record(pb_bytes: bytes) -> dict:
+    """Slipway's truth record: a keelson.TimestampedString whose value is JSON."""
+    import json
+
+    from keelson.payloads.Primitives_pb2 import TimestampedString
+
+    msg = TimestampedString()
+    msg.ParseFromString(pb_bytes)
+    return json.loads(msg.value)
+
+
+def vehicle_armed(pb_bytes: bytes) -> bool:
+    from keelson.payloads.Primitives_pb2 import TimestampedBool
+
+    msg = TimestampedBool()
+    msg.ParseFromString(pb_bytes)
+    return bool(msg.value)
+

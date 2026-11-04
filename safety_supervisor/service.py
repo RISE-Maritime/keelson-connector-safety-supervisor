@@ -110,7 +110,30 @@ class Supervisor:
             self._actuate()
             self._publish_state(self.state)
 
+    def on_vehicle_stopped(self, source: str, stopped: bool) -> None:
+        """The legacy-stop observer. Only an EDGE into stopped latches: a vessel that is simply
+        disarmed -- at the berth, at boot -- is not an emergency stop.
+
+        The last value per source is persisted (`legacy:<source>`), so an edge that happened while
+        this process was down is seen at the next boot. The first value ever seen sets the memory and
+        latches nothing. The state commits BEFORE the memory: a crash between the two re-detects the
+        same edge, which apply_legacy_stop then ignores (a STOP-class cause is already there)."""
+        key = f"legacy:{source}"
+        seen = self.store.get_json(key)
+        was = None if seen is None else bool(seen.get("stopped"))
+        if was is False and stopped:
+            st = model.apply_legacy_stop(self.state, self.now_ms(), source)
+            if st is not self.state:
+                log.warning("legacy emergency stop observed on %s: STOPPED (EXTERNAL_LEGACY_ESTOP)", source)
+                self.store.commit(st)
+                self.state = st
+                self._actuate()
+                self._publish_state(self.state)
+        if was != stopped:
+            self.store.put_json(key, {"stopped": stopped})
+
     def heartbeat(self) -> None:
+        self._actuate()  # an actuator that did not land retries here
         self._publish_state(self.state)
 
     def gc(self, retention_ms: int) -> int:

@@ -222,6 +222,24 @@ def apply_physical_stop(state: State, pressed: bool, now_ms: int, source: str = 
     return _with_causes(state, (*others, *released), now_ms, who=source, why="physical stop released")
 
 
+def apply_legacy_stop(state: State, now_ms: int, source: str) -> State:
+    """A stop taken on the legacy path -- a direct `vehicle_lifecycle/v1 emergency_stop`, seen in the
+    vehicle's own telemetry -- converges here as EXTERNAL_LEGACY_ESTOP (protocol flow
+    legacy_stop_converges). The caller passes only an EDGE into stopped (service.on_vehicle_stopped).
+
+    CLEARABLE BY A RESET (Ted, 2026-11-04). A cause that could not clear while the vehicle reports
+    itself stopped would deadlock: the gate refuses every arm unless CLEAR, so she could never be
+    armed again. A RESET by the profile's holder clears it like a STOP's own cause; she stays stopped
+    until somebody arms her, and a RESET re-arms nothing.
+
+    NOTHING WHEN SHE IS ALREADY STOPPED BY A STOP-CLASS CAUSE: the stop the supervisor itself just
+    actuated comes back as exactly this edge, and must not become a second cause."""
+    if any(c.type in STOP_CLASS for c in state.causes):
+        return state
+    cause = Cause(T.CAUSE_TYPE_EXTERNAL_LEGACY_ESTOP, source, now_ms, True, reason="stop observed on the legacy path")
+    return _with_causes(state, (*state.causes, cause), now_ms, who=source, why="legacy emergency stop observed")
+
+
 def apply_lockout(state: State, engaged: bool, now_ms: int, *, simulated: bool, source: str = "local-lockout") -> State:
     """The local maintenance lockout (I14). Above every lease; no remote role clears it; clearing it
     removes its own cause and re-arms nothing."""

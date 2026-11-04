@@ -29,8 +29,8 @@ from keelson.scaffolding.signals import GracefulShutdown
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from safety_supervisor import codec
-from safety_supervisor.actuation import LoggingActuator
-from safety_supervisor.inputs import NoInputs, SimulatedInputs
+from safety_supervisor.actuation import LoggingActuator, SlipwayLifecycleActuator
+from safety_supervisor.inputs import NoInputs, SimulatedInputs, TruthInputs
 from safety_supervisor.policy import resolve
 from safety_supervisor.projection import Projections
 from safety_supervisor.service import Supervisor
@@ -50,7 +50,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--policy", type=pathlib.Path, help="SafetyPolicySnapshot JSON file")
     p.add_argument("--accept-policy", action="store_true", help="MAINTENANCE: adopt --policy into the store")
     p.add_argument("--recover-locally", metavar="OPERATOR", help="MAINTENANCE: leave RECOVERY_REQUIRED for STOPPED (never CLEAR)")
-    p.add_argument("--sim-inputs", type=pathlib.Path, help="test profile: JSON {physical_stop, lockout} simulating the onboard inputs")
+    sim = p.add_mutually_exclusive_group()
+    sim.add_argument("--sim-inputs", type=pathlib.Path, help="test profile: JSON {physical_stop, lockout} simulating the onboard inputs")
+    sim.add_argument("--sim-truth", action="store_true",
+                     help="test profile: read the lockout (and, with --legacy-observe slipway, her stop latch) from Slipway's truth record")
+    p.add_argument("--truth-ttl-s", type=float, default=5.0, help="log when the truth record is silent this long (it never releases)")
+    p.add_argument("--legacy-observe", metavar="slipway|mavlink:<source_id>",
+                   help="observe legacy stops: Slipway's truth-record latch, or a MAVLink vehicle_armed source")
+    p.add_argument("--actuator", choices=["logging", "slipway"], default="logging", help="safety actuation (default: logging only)")
+    p.add_argument("--slipway-responder-id", default="sim", help="the Slipway vessel's vehicle_lifecycle/v1 responder (default sim)")
+    p.add_argument("--actuator-timeout-s", type=float, default=2.0, help="timeout of one actuator call")
     p.add_argument("--heartbeat-s", type=float, default=5.0, help="safety_state heartbeat period (default 5 s)")
     p.add_argument("--retention-days", type=float, default=7.0, help="ledger anti-replay retention (default 7 days)")
     p.add_argument("--boot-get-timeout-s", type=float, default=5.0, help="timeout of the boot GET of retained requests")
@@ -85,7 +94,20 @@ def main() -> int:
         log.error("no adopted SafetyPolicySnapshot: every STOP lands on the default policy, every RESET is refused")
     else:
         log.info("policy revision %s, profile %s", policy.config_revision, policy.command_profile)
-    inputs = SimulatedInputs(args.sim_inputs) if args.sim_inputs else NoInputs()
+    truth = TruthInputs(ttl_ms=int(args.truth_ttl_s * 1000)) if args.sim_truth else None
+    inputs = truth or (SimulatedInputs(args.sim_inputs) if args.sim_inputs else NoInputs())
+    legacy = args.legacy_observe
+    if legacy and legacy != "slipway" and not legacy.startswith("mavlink:"):
+        log.error("--legacy-observe must be 'slipway' or 'mavlink:<source_id>'")
+        return 2
+    if legacy == "slipway" and truth is None:
+        log.error("--legacy-observe slipway reads the truth record: it needs --sim-truth")
+        return 2
+    if args.actuator == "slipway":
+        refusal = SlipwayLifecycleActuator.guard(policy.command_profile if policy else None, args.sim_truth)
+        if refusal:
+            log.error("refusing to start: %s", refusal)
+            return 2
     log.warning("independence level L1: own process and Zenoh session; shares the router and the box (§3.4)")
 
     conf = create_zenoh_config(args.mode, args.connect, args.listen, zenoh_config=args.zenoh_config)
@@ -102,9 +124,29 @@ def main() -> int:
             session.put(f"{keys['result']}/{r.request_id}",
                         keelson.enclose(codec.result_to_pb(r, vessel_id=vessel, supervisor_id=args.supervisor_id).SerializeToString()))
 
+        if args.actuator == "slipway":
+            from keelson.interfaces.VehicleCommon_pb2 import CommandResult
+            from keelson.interfaces.VehicleLifecycle_pb2 import EmergencyStopRequest, EmergencyStopResponse
+
+            stop_key = keelson.construct_rpc_key(realm, vessel, "vehicle_lifecycle", "v1", "emergency_stop", args.slipway_responder_id)
+
+            def call_emergency_stop():
+                for reply in session.get(stop_key, payload=EmergencyStopRequest().SerializeToString(), timeout=args.actuator_timeout_s):
+                    if reply.ok is None:
+                        return False, "error reply"
+                    resp = EmergencyStopResponse()
+                    resp.ParseFromString(reply.ok.payload.to_bytes())
+                    return resp.result == CommandResult.COMMAND_RESULT_ACCEPTED, resp.detail or CommandResult.Name(resp.result)
+                return False, f"no answer from {args.slipway_responder_id} within {args.actuator_timeout_s} s"
+
+            actuator = SlipwayLifecycleActuator(call_emergency_stop)
+            log.warning("SIL actuator: an accepted STOP calls %s's vehicle_lifecycle/v1 emergency_stop", vessel)
+        else:
+            actuator = LoggingActuator()
+
         projections = Projections(store)
         sup = Supervisor(store=store, vessel_id=vessel, policy=policy, projections=projections,
-                         publish_state=publish_state, publish_result=publish_result, actuator=LoggingActuator())
+                         publish_state=publish_state, publish_result=publish_result, actuator=actuator)
         sup.boot(inputs.read(), recover_operator=args.recover_locally)
         log.info("booted: %s, fence %s/%s", keelson.payloads.SafetyState_pb2.SafetyState.State.Name(sup.state.state),
                  sup.state.fence.term[:8], sup.state.fence.generation)
@@ -115,6 +157,10 @@ def main() -> int:
             session.declare_subscriber(keys["assignment"], lambda s: events.put(("assignment", s))),
             session.declare_subscriber(keys["conn"], lambda s: events.put(("conn", s))),
         ]
+        if truth is not None:
+            subs.append(session.declare_subscriber(f"{base}/raw_json/truth", lambda s: events.put(("truth", s))))
+        if legacy and legacy.startswith("mavlink:"):
+            subs.append(session.declare_subscriber(f"{base}/vehicle_armed/{legacy.split(':', 1)[1]}", lambda s: events.put(("armed", s))))
         if policy and policy.manager_source_id:
             mkey = keelson.construct_source_liveliness_key(realm, vessel, policy.manager_source_id)
             subs.append(session.liveliness().declare_subscriber(mkey, history=True, handler=lambda s: events.put(("manager", s))))
@@ -144,9 +190,16 @@ def main() -> int:
                         projections.on_conn_lease(_decode(sample, CommandAuthority))
                     elif kind == "manager":
                         projections.on_manager_liveliness(sample.kind == zenoh.SampleKind.PUT)
+                    elif kind == "truth":
+                        truth.on_truth(codec.truth_record(keelson.uncover(sample.payload.to_bytes())[2]), int(time.monotonic() * 1000))
+                        if legacy == "slipway" and truth.estop() is not None:
+                            sup.on_vehicle_stopped("slipway", truth.estop())
+                    elif kind == "armed":
+                        armed = codec.vehicle_armed(keelson.uncover(sample.payload.to_bytes())[2])
+                        sup.on_vehicle_stopped(legacy, not armed)
                 except Exception:  # pylint: disable=broad-except
                     log.exception("could not handle a %s sample", kind)
-                sup.on_inputs(inputs.read())
+                sup.on_inputs(truth.read(int(time.monotonic() * 1000)) if truth is not None else inputs.read())
                 now = time.monotonic()
                 if now - last_hb >= args.heartbeat_s:
                     sup.heartbeat()

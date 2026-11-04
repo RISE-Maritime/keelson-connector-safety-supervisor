@@ -16,6 +16,10 @@ before it is merged or run anywhere but the isolated tests.** Every commit messa
   - local recovery gives STOPPED, never CLEAR;
   - a RESET re-arms nothing;
   - with no adopted policy a STOP still lands.
+  - silence on an input (the truth record) never releases a lockout;
+  - a legacy stop latches on the EDGE only, and a RESET clears it (README).
+- **The Slipway actuator is SIL only**: refused outside `test` and without `--sim-truth`; a release
+  never calls anything.
 - **One transaction.** The state and its ledger entry commit together. Publish after the commit;
   mark published after publishing; garbage-collect only published entries past the retention.
 - **Pure decisions.** `safety_supervisor/model.py` has no clock, no store and no Zenoh. Every

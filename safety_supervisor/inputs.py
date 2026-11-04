@@ -46,3 +46,42 @@ class SimulatedInputs:
             return self._last or Reading(False, False, simulated=True)
         self._last = Reading(bool(d.get("physical_stop", False)), bool(d.get("lockout", False)), simulated=True)
         return self._last
+
+
+class TruthInputs:
+    """The SIL stand-in for the onboard inputs: Slipway's truth record (`raw_json/truth`), which
+    carries her local lockout switch (Slipway ADR-0140, the `set_lockout` scenario event) and her
+    ADR-0126 emergency-stop latch. In SIL the simulator IS the hardware, so this is the lockout input
+    the `operational` profile's hardware inhibit stands in for -- and it is labelled simulated.
+
+    SILENCE NEVER RELEASES. Between records -- or after the kernel stops publishing -- the last reading
+    stands; a record older than `ttl_ms` is logged, never read as "released". Fed by the bin's
+    subscriber (`on_truth`); the decision loop calls `read`."""
+
+    def __init__(self, ttl_ms: int = 5000):
+        self.ttl_ms = ttl_ms
+        self._lockout = False
+        self._estop: bool | None = None
+        self._heard_ms: int | None = None
+        self._warned = False
+
+    def on_truth(self, record: dict, now_ms: int) -> None:
+        self._lockout = bool(record.get("lockout", self._lockout))
+        if "estop" in record:
+            self._estop = bool(record["estop"])
+        self._heard_ms = now_ms
+        self._warned = False
+
+    def estop(self) -> bool | None:
+        """Her own stop latch, as last heard; None before the first record."""
+        return self._estop
+
+    def stale(self, now_ms: int) -> bool:
+        return self._heard_ms is None or now_ms - self._heard_ms > self.ttl_ms
+
+    def read(self, now_ms: int | None = None) -> Reading:
+        if now_ms is not None and self._heard_ms is not None and self.stale(now_ms) and not self._warned:
+            log.error("Slipway's truth record is silent (> %d ms): keeping the last lockout reading", self.ttl_ms)
+            self._warned = True
+        return Reading(False, self._lockout, simulated=True)
+

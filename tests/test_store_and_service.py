@@ -239,3 +239,130 @@ def test_states_published_carry_the_current_fence(tmp_path):
     sup.handle_request(stop("s1"))
     assert bus.states[-1].fence == sup.state.fence and bus.states[-1].state == S.SAFETY_STATE_STOPPED
     assert isinstance(sup.state.fence, Fence)
+
+
+# ---------------------------------------------------------------------------- the legacy stop (edge, RESET clears)
+
+
+def _clear(tmp_path, **kw):
+    """A supervisor at CLEAR: recovered locally, then reset by the conn."""
+    sup, store, bus, proj = make(tmp_path, recover="eng", **kw)
+    conn(proj)
+    sup.handle_request(Request(V, "r0", C.EMERGENCY_COMMAND_RESET, "ted@ROC-1", expected_stopped_fence=sup.state.fence))
+    assert sup.state.state == S.SAFETY_STATE_CLEAR
+    return sup, store, bus, proj
+
+
+def test_an_observed_edge_into_stopped_latches_and_a_reset_clears_it(tmp_path):
+    sup, _, _, _ = _clear(tmp_path)
+    sup.on_vehicle_stopped("slipway", False)
+    sup.on_vehicle_stopped("slipway", True)
+    assert sup.state.state == S.SAFETY_STATE_STOPPED
+    cause = next(c for c in sup.state.causes if c.type == T.CAUSE_TYPE_EXTERNAL_LEGACY_ESTOP)
+    assert cause.clearable_remotely and cause.source == "slipway"
+    r = sup.handle_request(Request(V, "r1", C.EMERGENCY_COMMAND_RESET, "ted@ROC-1", expected_stopped_fence=sup.state.fence))
+    assert r.outcome == O.SAFETY_REQUEST_OUTCOME_ACCEPTED and sup.state.state == S.SAFETY_STATE_CLEAR
+
+
+def test_a_vessel_that_is_simply_stopped_is_not_an_emergency_stop(tmp_path):
+    sup, _, _, _ = _clear(tmp_path)
+    sup.on_vehicle_stopped("mavlink:mavlink", True)  # first value ever seen: disarmed at the berth
+    sup.on_vehicle_stopped("mavlink:mavlink", True)
+    assert sup.state.state == S.SAFETY_STATE_CLEAR
+
+
+def test_staying_stopped_after_a_reset_does_not_latch_again(tmp_path):
+    sup, _, _, _ = _clear(tmp_path)
+    sup.on_vehicle_stopped("slipway", False)
+    sup.on_vehicle_stopped("slipway", True)
+    sup.handle_request(Request(V, "r1", C.EMERGENCY_COMMAND_RESET, "ted@ROC-1", expected_stopped_fence=sup.state.fence))
+    sup.on_vehicle_stopped("slipway", True)  # her latch is still on until someone arms her: no new edge
+    assert sup.state.state == S.SAFETY_STATE_CLEAR
+
+
+def test_an_edge_while_the_supervisor_was_down_is_seen_at_boot(tmp_path):
+    sup, store, _, _ = _clear(tmp_path)
+    sup.on_vehicle_stopped("slipway", False)
+    store.close()
+    sup2, *_ = make(tmp_path)
+    sup2.on_vehicle_stopped("slipway", True)  # the first value after the restart, against the persisted memory
+    assert sup2.state.state == S.SAFETY_STATE_STOPPED
+
+
+def test_the_stop_the_supervisor_actuated_comes_back_and_adds_nothing(tmp_path):
+    sup, _, _, _ = _clear(tmp_path)
+    sup.on_vehicle_stopped("slipway", False)
+    sup.handle_request(stop("s1"))
+    gen = sup.state.fence.generation
+    sup.on_vehicle_stopped("slipway", True)  # the echo of our own STOP
+    assert sup.state.fence.generation == gen
+    assert [c.type for c in sup.state.causes] == [T.CAUSE_TYPE_SAFETY_TRIP]
+
+
+# ---------------------------------------------------------------------------- Slipway's truth record
+
+
+def test_the_truth_records_lockout_is_a_simulated_lockout_and_silence_never_releases_it():
+    from safety_supervisor.inputs import TruthInputs
+
+    t = TruthInputs(ttl_ms=1000)
+    assert t.read(0) == Reading(False, False, simulated=True) and t.estop() is None
+    t.on_truth({"estop": False, "lockout": True}, 0)
+    assert t.read(10).lockout and t.estop() is False
+    assert t.read(60_000).lockout and t.stale(60_000)  # silent for a minute: still locked out
+    t.on_truth({"estop": True, "lockout": False}, 61_000)
+    assert not t.read(61_000).lockout and t.estop() is True
+
+
+def test_a_lockout_from_the_truth_record_is_locked_out_and_labelled(tmp_path):
+    from safety_supervisor.inputs import TruthInputs
+
+    t = TruthInputs()
+    sup, *_ = _clear(tmp_path)
+    t.on_truth({"lockout": True, "estop": False}, 0)
+    sup.on_inputs(t.read(0))
+    assert sup.state.state == S.SAFETY_STATE_LOCKED_OUT and sup.state.lockout_simulated
+
+
+# ---------------------------------------------------------------------------- the Slipway actuator
+
+
+def test_the_slipway_actuator_stops_her_retries_until_accepted_and_never_rearms():
+    from safety_supervisor.actuation import SlipwayLifecycleActuator
+
+    answers = [(False, "no answer"), (True, "engaged")]
+    a = SlipwayLifecycleActuator(lambda: answers.pop(0))
+    a.apply(True, "STOP")
+    assert a.calls == 1
+    a.apply(True, "STOP")  # the heartbeat retries
+    assert a.calls == 2
+    a.apply(True, "STOP")  # landed: not again
+    assert a.calls == 2
+    a.apply(False, "RESET")  # release calls nothing
+    assert a.calls == 2
+
+
+def test_the_slipway_actuator_is_for_the_test_profile_with_the_truth_record_only():
+    from safety_supervisor.actuation import SlipwayLifecycleActuator
+
+    assert SlipwayLifecycleActuator.guard("operational", True)
+    assert SlipwayLifecycleActuator.guard(None, True)
+    assert SlipwayLifecycleActuator.guard("test", False)
+    assert SlipwayLifecycleActuator.guard("test", True) is None
+
+
+def test_the_heartbeat_retries_an_actuation_that_did_not_land(tmp_path):
+    from safety_supervisor.actuation import SlipwayLifecycleActuator
+
+    calls = []
+    store = Store(tmp_path / "safety.sqlite")
+    bus = Bus()
+    act = SlipwayLifecycleActuator(lambda: calls.append(1) or (len(calls) > 1, "x"))
+    sup = Supervisor(store=store, vessel_id=V, policy=TEST_POLICY, projections=Projections(store, clock=Clock()),
+                     publish_state=bus.state, publish_result=bus.result, actuator=act, now_ms=lambda: 1000)
+    sup.boot(NOTHING, recover_operator="eng")  # STOPPED: inhibiting, first call fails
+    assert len(calls) == 1
+    sup.heartbeat()
+    assert len(calls) == 2
+    sup.heartbeat()
+    assert len(calls) == 2

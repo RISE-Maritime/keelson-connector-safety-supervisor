@@ -8,11 +8,12 @@ ledger guarantees that a request never executes twice.
   (keelson PR #332).
 - **Design:** crowsnest-dev `docs/COMMAND-ARCHITECTURE.md` §3.
 
-> **Status: core only. It actuates nothing.** The safety actuation interface (propulsion inhibit,
-> safe state, local hold, shutdown, a physical output; MAVLink force-disarm for the drone case) is
-> an interface with a logging implementation. So is the observer of legacy e-stops. Each real one
-> is its own change, with its own safety review. Never run this against a real vessel or a shared
-> network.
+> **Status: a real vessel is out of scope; a Slipway vessel is not.**
+> - **Actuation:** a logging actuator, or the **SIL** one (`--actuator slipway`), which stops a
+>   simulated vessel. Each real interface (propulsion inhibit, safe state, local hold, shutdown, a
+>   physical output; MAVLink force-disarm for the drone case) is its own change, with its own
+>   safety review.
+> - **Never** run this against a real vessel or a shared network.
 
 ## What it does, and only that
 
@@ -46,8 +47,29 @@ Minimal, and simpler than what it protects (protocol inv. 15):
 - **The physical stop** adds `PHYSICAL_STOP`. While pressed, no RESET clears it. Releasing it
   makes it clearable, and then a RESET clears it.
 - **The local lockout** adds `LOCKOUT` and sets `local_lockout`. No remote role clears it.
-  Clearing it locally removes its own cause and re-arms nothing (I14). In this cut the stop and
-  the lockout are **simulated** from a local file, and the state says `lockout_simulated`.
+  Clearing it locally removes its own cause and re-arms nothing (I14). Both the stop and the lockout
+  are **simulated**, and the state says `lockout_simulated`. They come from one of two sources:
+  - a local file (`--sim-inputs`);
+  - **Slipway's truth record** (`--sim-truth`), which carries her `set_lockout` switch (Slipway
+    ADR-0140). In SIL the simulator is the hardware: this is what the `operational` profile's
+    hardware inhibit stands in for. Silence never releases it. The last reading stands, and a
+    silent record is logged.
+- **A legacy stop converges** (`--legacy-observe slipway` or `mavlink:<source_id>`). A direct
+  `vehicle_lifecycle/v1 emergency_stop` is seen in the vehicle's own telemetry: her truth-record
+  latch, or `vehicle_armed` going false. It latches `EXTERNAL_LEGACY_ESTOP`, with these rules:
+  - **Only an edge latches.** A vessel that is simply disarmed, at the berth or at boot, is not an
+    emergency stop. The last value is persisted, so an edge that happened while the supervisor was
+    down is caught at boot.
+  - **A RESET clears it**, like a STOP's own cause (Ted, 2026-11-04). A cause that could not clear
+    while she reports herself stopped would deadlock against the gate, which refuses every arm
+    unless CLEAR. After the RESET she stays stopped until somebody arms her.
+  - **Nothing is added while a STOP-class cause is present**, so the stop the supervisor itself
+    actuated, echoed back, never doubles.
+- **The SIL actuator** (`--actuator slipway`): an inhibit calls her `vehicle_lifecycle/v1
+  emergency_stop` on responder `sim`.
+  - It is retried at every heartbeat until a reply is ACCEPTED.
+  - A release calls nothing: a RESET re-arms nothing.
+  - It refuses to start outside the `test` profile, or without `--sim-truth`.
 - **The command_assignment projection** (operational RESET) **fails closed** with
   REFUSED_ASSIGNMENT_PROJECTION_UNVERIFIED unless all of these hold:
   - the feed was heard within `feed_ttl_seconds` on this process's monotonic clock;
@@ -89,6 +111,10 @@ RESET is refused.
 safety-supervisor2keelson -r rise -e <vessel> --state-dir ./state \
   --policy config/policy.json --accept-policy --recover-locally "<who>@vessel" \
   --sim-inputs ./inputs.json --connect tcp/<router>:7447
+
+# against a Slipway vessel (test profile): her lockout switch, her stop latch, and her emergency_stop
+safety-supervisor2keelson -r rise -e slipway-usv-alpha --state-dir ./state --policy config/policy.json \
+  --sim-truth --legacy-observe slipway --actuator slipway --connect tcp/<local router>:7447
 ```
 
 ## Developing before the alpha
@@ -109,10 +135,11 @@ When the alpha exists: set the exact version in `pyproject.toml`, run `uv lock`,
 
 ## Not in this cut
 
-- The real safety actuators and the legacy `vehicle_lifecycle/v1 emergency_stop` observer
-  (`EXTERNAL_LEGACY_ESTOP`).
+- The real safety actuators for a real vessel.
 - Hardware stop and lockout inputs: the `operational` profile's lockout is a hardware inhibit
   that this only observes.
+- Slipway's legacy `arm(true)` gated on ACTUATION_ALLOWED from this `safety_state` (I6). That needs
+  Slipway's keelson repin to a build that carries `SafetyState`.
 - Envelope trips.
 - Deleting the retained request keys once answered.
 - `maintenance_state`.

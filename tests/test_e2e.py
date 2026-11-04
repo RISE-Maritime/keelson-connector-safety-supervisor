@@ -14,7 +14,14 @@ import pytest
 import zenoh
 from keelson.payloads.CommandAuthority_pb2 import CommandAuthority, Role
 from keelson.payloads.Fence_pb2 import Fence
-from keelson.payloads.SafetyState_pb2 import EmergencyCommand, EmergencyRequest, SafetyRequestOutcome, SafetyRequestResult, SafetyState
+from keelson.payloads.SafetyState_pb2 import (
+    EmergencyCommand,
+    EmergencyRequest,
+    SafetyCause,
+    SafetyRequestOutcome,
+    SafetyRequestResult,
+    SafetyState,
+)
 
 pytestmark = pytest.mark.e2e
 
@@ -168,3 +175,102 @@ def test_the_ledger_survives_a_restart(h):
     st = h.latest_state()
     assert st.state == SafetyState.SAFETY_STATE_STOPPED
     assert (st.safety_generation.term, st.safety_generation.generation) == (r.processed_fence.term, r.processed_fence.generation)
+
+
+# ---------------------------------------------------------------------------- the loop closed on Slipway
+
+
+class FakeKernel:
+    """The Slipway kernel as the supervisor meets it: her truth record, and her vehicle_lifecycle/v1
+    on responder `sim`, counting the calls it gets."""
+
+    def __init__(self, session):
+        from keelson.interfaces.VehicleCommon_pb2 import CommandResult
+        from keelson.interfaces.VehicleLifecycle_pb2 import ArmResponse, EmergencyStopResponse
+        from keelson.scaffolding.rpc import serve_rpc
+
+        self.session = session
+        self.stops, self.arms = 0, 0
+
+        def emergency_stop(op):
+            self.stops += 1
+            op.reply_ok(EmergencyStopResponse(result=CommandResult.COMMAND_RESULT_ACCEPTED, detail="latched"))
+
+        def arm(op):
+            self.arms += 1
+            op.reply_ok(ArmResponse(result=CommandResult.COMMAND_RESULT_ACCEPTED))
+
+        serve_rpc(session, base_path=REALM, entity_id=V, responder_id="sim", interface="vehicle_lifecycle", version="v1",
+                  handlers={"emergency_stop": emergency_stop, "arm": arm}, declare_liveliness=False)
+
+    def truth(self, *, estop=False, lockout=False):
+        from keelson.payloads.Primitives_pb2 import TimestampedString
+
+        rec = TimestampedString(value=json.dumps({"entity_id": V, "estop": estop, "lockout": lockout}))
+        self.session.put(f"{BASE}/raw_json/truth", keelson.enclose(rec.SerializeToString()))
+
+
+SIL = ("--accept-policy", "--sim-truth", "--legacy-observe", "slipway", "--actuator", "slipway")
+
+
+def _reset_by_the_conn(h):
+    lease = CommandAuthority(vessel_id=V, controller_id="ted@ROC-1", role=Role.ROLE_CONN)
+    h.session.put(f"{BASE}/command_authority/{V}", keelson.enclose(lease.SerializeToString()))
+    time.sleep(0.3)
+    st = h.latest_state()
+    return h.request(EmergencyCommand.EMERGENCY_COMMAND_RESET, st.safety_generation)
+
+
+def test_a_stop_stops_her_once_and_her_echo_adds_no_second_cause(h):
+    k = FakeKernel(h.session)
+    h.start(*SIL, "--recover-locally", "engineer-on-board")
+    k.truth(estop=False)
+    h.wait(lambda: k.stops >= 1, what="the recovery's STOPPED to actuate")  # local recovery is STOPPED
+    assert _reset_by_the_conn(h).outcome == SafetyRequestOutcome.SAFETY_REQUEST_OUTCOME_ACCEPTED
+    h.wait(lambda: h.states[-1].state == SafetyState.SAFETY_STATE_CLEAR, what="CLEAR")
+    before = k.stops
+    r = h.request(EmergencyCommand.EMERGENCY_COMMAND_STOP)
+    assert r.outcome == SafetyRequestOutcome.SAFETY_REQUEST_OUTCOME_ACCEPTED
+    h.wait(lambda: k.stops == before + 1, what="her emergency_stop")
+    k.truth(estop=True)  # her latch engages: the echo of our own stop
+    time.sleep(0.8)
+    causes = [c.type for c in h.latest_state().active_causes]
+    assert causes.count(SafetyCause.Type.CAUSE_TYPE_EXTERNAL_LEGACY_ESTOP) == 0 and k.stops == before + 1
+
+
+def test_her_lockout_switch_is_locked_out_and_labelled_simulated(h):
+    k = FakeKernel(h.session)
+    h.start(*SIL, "--recover-locally", "engineer-on-board")
+    k.truth(lockout=True)
+    h.wait(lambda: h.states and h.states[-1].state == SafetyState.SAFETY_STATE_LOCKED_OUT, what="LOCKED_OUT")
+    st = h.states[-1]
+    assert st.local_lockout and st.lockout_simulated
+
+
+def test_a_legacy_stop_converges_and_a_reset_clears_it_without_arming_her(h):
+    k = FakeKernel(h.session)
+    h.start(*SIL, "--recover-locally", "engineer-on-board")
+    k.truth(estop=False)
+    time.sleep(0.3)
+    _reset_by_the_conn(h)
+    h.wait(lambda: h.states[-1].state == SafetyState.SAFETY_STATE_CLEAR, what="CLEAR")
+    k.truth(estop=True)  # somebody fired the legacy emergency_stop directly
+    h.wait(lambda: h.states[-1].state == SafetyState.SAFETY_STATE_STOPPED, what="the legacy stop to converge")
+    assert SafetyCause.Type.CAUSE_TYPE_EXTERNAL_LEGACY_ESTOP in [c.type for c in h.states[-1].active_causes]
+    assert _reset_by_the_conn(h).outcome == SafetyRequestOutcome.SAFETY_REQUEST_OUTCOME_ACCEPTED
+    h.wait(lambda: h.states[-1].state == SafetyState.SAFETY_STATE_CLEAR, what="CLEAR after the RESET")
+    assert k.arms == 0  # a RESET re-arms nothing
+
+
+def test_a_legacy_stop_while_the_supervisor_was_down_is_latched_at_boot(h):
+    k = FakeKernel(h.session)
+    h.start(*SIL, "--recover-locally", "engineer-on-board")
+    k.truth(estop=False)
+    time.sleep(0.3)
+    _reset_by_the_conn(h)
+    h.wait(lambda: h.states[-1].state == SafetyState.SAFETY_STATE_CLEAR, what="CLEAR")
+    h.stop_proc()
+    h.states.clear()
+    h.start("--sim-truth", "--legacy-observe", "slipway", "--actuator", "slipway")
+    k.truth(estop=True)  # her latch engaged while we were down
+    h.wait(lambda: h.states and h.states[-1].state == SafetyState.SAFETY_STATE_STOPPED, what="the latch at boot")
