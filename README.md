@@ -176,6 +176,16 @@ To try a build without moving the pin, `uv pip install keelson==<version>` into 
   that this only observes.
 - Slipway's side of I6 is Slipway's: its kernel refuses remote orders while this `safety_state`
   is not CLEAR, or is silent once heard (SLIPWAY ADR-0141).
-- Envelope trips.
+- Envelope trips. Their shape is decided (Ted, 2026-11-05, crowsnest-dev#278); the
+  implementation is crowsnest-dev#291.
+  - **A separate envelope watchdog raises them.** It runs on its own Zenoh session and reads its
+    own sensors, never the navigator or `envelope_exceedance`. It sends an `EmergencyRequest`
+    STOP like any other tripper.
+  - **This supervisor's policy names that principal as an envelope tripper,** and records
+    `CAUSE_TYPE_ENVELOPE` for its STOP. Anyone else's STOP stays `SAFETY_TRIP`.
+  - **The supervisor itself measures nothing,** so it stays simpler than what it protects. No
+    protocol change is needed: `EmergencyRequest` has no cause field, so the cause follows from
+    who sent it.
+  - **Open:** the per-vessel limits and how an ENVELOPE cause clears are #291's to settle.
 - Deleting the retained request keys once answered.
 - `maintenance_state`.
