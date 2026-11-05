@@ -29,7 +29,7 @@ before it is merged or run anywhere but the isolated tests.** Every commit messa
   decision is tested there.
 - **Tests never touch a network.** The e2e runs on loopback with multicast scouting off on both
   sides, and nothing runs against a vessel or the shared Zenoh network.
-- **keelson is an exact published pin** (README, "Developing before the alpha"). Never commit a
+- **keelson is an exact published pin** (README, "The keelson pin"). Never commit a
   path or a local build.
 
 ## Commands

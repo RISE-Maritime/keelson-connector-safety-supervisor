@@ -5,7 +5,7 @@ import pytest
 from safety_supervisor import model
 from safety_supervisor.model import Authorisation, Cause, Fence, Request, State
 
-T, S, O, C = model.T, model.S, model.O, model.C
+T, S, O, C = model.T, model.S, model.O, model.C  # noqa: E741
 V = "sf18"
 OK = Authorisation(may_trip=True, reset_refusal=None)
 

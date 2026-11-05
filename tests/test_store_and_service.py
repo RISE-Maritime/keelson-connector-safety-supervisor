@@ -15,7 +15,7 @@ from safety_supervisor.projection import Projections
 from safety_supervisor.service import Supervisor
 from safety_supervisor.store import Store
 
-T, S, O, C = model.T, model.S, model.O, model.C
+T, S, O, C = model.T, model.S, model.O, model.C  # noqa: E741
 V = "sf18"
 NOTHING = Reading(False, False, simulated=True)
 TEST_POLICY = parse({"config_revision": 1, "command_profile": "test"})

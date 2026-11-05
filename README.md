@@ -149,29 +149,33 @@ safety-supervisor2keelson -r rise -e slipway-usv-alpha --state-dir ./state --pol
   --sim-truth --legacy-observe slipway --actuator slipway --connect tcp/<local router>:7447
 ```
 
-## Developing before the alpha
+## The keelson pin
 
-The pin is `keelson==0.6.0a332.devN`: the alpha of keelson #332, still to be cut. Until it is
-published, `uv sync` cannot resolve it. Develop in a plain venv against the #332 worktree's SDK
-**without committing that**:
+`keelson==0.6.0.dev21` is keelson's **experimental** channel, `0.6.0-experimental.21` (PyPI spells
+it as a dev release). It is `dev` plus every open keelson PR whose CI passed, and the types this
+uses (`EmergencyRequest`, `SafetyState`, `SafetyRequestResult`) exist only on one of them, #332
+(at `d7d9512` in that build). The build's tag message is its manifest.
+
+An experimental tree stops existing the moment any of its PRs lands or is rebased, so the pin is
+tracked by crowsnest-dev #82. When #332 merges, repin to the `-pre.N` that carries it. To move it:
 
 ```bash
-uv venv --python 3.13 .venv
-uv pip install --python .venv/bin/python -e ../keelson.worktrees/emergency-request/sdks/python pytest ruff
-.venv/bin/python -m pytest -q          # unit + e2e (e2e: loopback, multicast scouting off)
-.venv/bin/ruff check .
+# set the exact version in pyproject.toml, then
+uv lock --refresh-package keelson
+uv sync --locked --extra dev --python 3.13
+uv run --locked pytest -q && uv run --locked ruff check .
 ```
 
-When the alpha exists: set the exact version in `pyproject.toml`, run `uv lock`, and use
-`uv sync --locked --extra dev`.
+To try a build without moving the pin, `uv pip install keelson==<version>` into the venv and
+`uv sync --locked` restores it.
 
 ## Not in this cut
 
 - The real safety actuators for a real vessel.
 - Hardware stop and lockout inputs: the `operational` profile's lockout is a hardware inhibit
   that this only observes.
-- Slipway's legacy `arm(true)` gated on ACTUATION_ALLOWED from this `safety_state` (I6). That needs
-  Slipway's keelson repin to a build that carries `SafetyState`.
+- Slipway's side of I6 is Slipway's: its kernel refuses remote orders while this `safety_state`
+  is not CLEAR, or is silent once heard (SLIPWAY ADR-0141).
 - Envelope trips.
 - Deleting the retained request keys once answered.
 - `maintenance_state`.

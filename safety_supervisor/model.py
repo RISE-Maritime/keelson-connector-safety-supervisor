@@ -23,7 +23,7 @@ from keelson.payloads.SafetyState_pb2 import (
 
 T = SafetyCause.Type
 S = SafetyState.State
-O = SafetyRequestOutcome
+O = SafetyRequestOutcome  # noqa: E741 - the enum's alias, like T, S and C
 C = EmergencyCommand
 
 # Causes that latch STOPPED (SafetyState.proto).
