@@ -166,6 +166,33 @@ def test_a_request_retained_while_the_supervisor_was_down_lands_at_boot(h):
         q.undeclare()
 
 
+def test_an_answered_request_is_deleted_from_a_stand_in_storage(h):
+    """#279: the stand-in answers the supervisor's GET from a dict and drops a key on a DELETE sample, as a
+    router storage keeps a tombstone. A STOP retained at boot is answered, then leaves storage."""
+    rid = uuid.uuid4().hex
+    key = f"{BASE}/emergency_request/{V}/{rid}"
+    req = EmergencyRequest(vessel_id=V, request_id=rid, command=EmergencyCommand.EMERGENCY_COMMAND_STOP, controller_id="ted@ROC-1")
+    stored = {key: keelson.enclose(req.SerializeToString())}
+
+    def answer(query):
+        for k, v in list(stored.items()):
+            query.reply(k, v)
+
+    def on_sample(sample):
+        if sample.kind == zenoh.SampleKind.DELETE:
+            stored.pop(str(sample.key_expr), None)
+
+    q = h.session.declare_queryable(f"{BASE}/emergency_request/{V}/*", answer)
+    sub = h.session.declare_subscriber(f"{BASE}/emergency_request/{V}/*", on_sample)
+    try:
+        h.start("--accept-policy", "--recover-locally", "engineer-on-board")
+        h.wait(lambda: rid in h.results, what="the retained STOP's result")
+        h.wait(lambda: key not in stored, what="the answered request deleted from storage")
+    finally:
+        sub.undeclare()
+        q.undeclare()
+
+
 def test_the_ledger_survives_a_restart(h):
     h.start("--accept-policy", "--recover-locally", "engineer-on-board")
     r = h.request(EmergencyCommand.EMERGENCY_COMMAND_STOP)

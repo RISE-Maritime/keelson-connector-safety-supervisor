@@ -43,12 +43,32 @@ class Clock:
         return self.t
 
 
-def make(tmp_path, bus=None, policy=TEST_POLICY, clock=None, recover=None, reading=NOTHING):
+class StandInStorage:
+    """The router's storage of `emergency_request/{vessel}/*`, as far as the supervisor touches it: the
+    request keys, and a delete that removes one -- or raises, when told to fail (crowsnest-dev#279)."""
+
+    def __init__(self, *ids):
+        self.keys = set(ids)
+        self.deletes: list[str] = []
+        self.fail = False
+
+    def put(self, rid):
+        self.keys.add(rid)
+
+    def delete(self, rid):
+        self.deletes.append(rid)
+        if self.fail:
+            raise ConnectionError("the router is unreachable")
+        self.keys.discard(rid)
+
+
+def make(tmp_path, bus=None, policy=TEST_POLICY, clock=None, recover=None, reading=NOTHING, storage=None, now=None):
     store = Store(tmp_path / "safety.sqlite")
     bus = bus or Bus()
     proj = Projections(store, clock=clock or Clock())
     sup = Supervisor(store=store, vessel_id=V, policy=policy, projections=proj, publish_state=bus.state,
-                     publish_result=bus.result, actuator=LoggingActuator(), now_ms=lambda: 1000)
+                     publish_result=bus.result, actuator=LoggingActuator(), now_ms=now or (lambda: 1000),
+                     delete_request=storage.delete if storage is not None else None)
     sup.boot(reading, recover_operator=recover)
     return sup, store, bus, proj
 
@@ -476,11 +496,120 @@ def test_the_poll_republishes_a_result_that_was_never_published(tmp_path):
 
 
 def test_a_retention_of_zero_never_collects_the_ledger(tmp_path):
-    sup, store, *_ = make(tmp_path, recover="eng")
+    storage = StandInStorage("s1")
+    sup, store, *_ = make(tmp_path, recover="eng", storage=storage)
     sup.handle_request(stop("s1"))
     sup.now_ms = lambda: 10**12  # a long time later: any positive retention would collect it
     assert sup.gc(0) == 0 and store.result_for("s1") is not None
     assert sup.gc(1) == 1  # ...and a real retention does, so the test can fail
+
+
+# ---------------------------------------------------------------------------- #279: answered keys leave storage
+
+DAY = 86_400_000
+
+
+class Now:
+    def __init__(self, t=1000):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def test_an_answered_requests_key_is_deleted_after_its_result_and_its_row_collected_after_the_retention(tmp_path):
+    storage, now = StandInStorage("s1"), Now()
+    sup, store, bus, _ = make(tmp_path, recover="eng", storage=storage, now=now)
+    order = []
+    sup._publish_result = lambda r: order.append(("published", r.request_id))
+    storage_delete = storage.delete
+    sup._delete_request = lambda rid: (order.append(("deleted", rid)), storage_delete(rid))
+    sup.handle_request(stop("s1"))
+    assert order == [("published", "s1"), ("deleted", "s1")]  # never before the result is out
+    assert "s1" not in storage.keys and store.deleted_ms("s1") == 1000
+    now.t = 1000 + 7 * DAY  # the retention counts from the delete
+    assert sup.gc(7 * DAY) == 0 and store.result_for("s1") is not None
+    now.t += 1
+    assert sup.gc(7 * DAY) == 1 and store.result_for("s1") is None
+
+
+def test_a_failed_delete_is_kept_retried_and_never_re_executed(tmp_path):
+    storage, now = StandInStorage("s1"), Now()
+    sup, store, bus, _ = make(tmp_path, recover="eng", storage=storage, now=now)
+    storage.fail = True
+    first = sup.handle_request(stop("s1"))
+    gen, causes = sup.state.fence, len(sup.state.causes)
+    assert "s1" in storage.keys and store.deleted_ms("s1") is None and store.undeleted() == ["s1"]
+    now.t = 1000 + 365 * DAY  # a year later: never collected while the key may still be in storage
+    assert sup.gc(DAY) == 0 and store.result_for("s1") is not None
+    # Read back meanwhile, retained or live: answered from the ledger, never executed again.
+    again = sup.handle_retained(stop("s1"))
+    assert again is None and sup.handle_request(stop("s1")) == first and sup.state.fence == gen
+    assert len(sup.state.causes) == causes  # no second cause from a second execution
+    storage.fail = False
+    sup.heartbeat()  # the retry
+    assert "s1" not in storage.keys and store.deleted_ms("s1") == now.t and store.undeleted() == []
+
+
+def test_a_key_seen_in_storage_after_its_delete_restarts_its_retention(tmp_path):
+    storage, now = StandInStorage("s1"), Now()
+    sup, store, *_ = make(tmp_path, recover="eng", storage=storage, now=now)
+    sup.handle_request(stop("s1"))
+    storage.put("s1")  # a delete that "returned" but did not take, or a replay of the request
+    now.t = 1000 + 6 * DAY
+    sup.request_still_stored("s1")  # the retained poll saw it
+    assert store.deleted_ms("s1") == now.t and storage.deletes == ["s1", "s1"] and "s1" not in storage.keys
+    now.t = 1000 + 7 * DAY + 1  # past the ORIGINAL deadline: kept, its clock restarted
+    assert sup.gc(7 * DAY) == 0
+    now.t = 1000 + 13 * DAY + 1
+    assert sup.gc(7 * DAY) == 1
+    # Seen again while the router refuses the delete: the old clock is void, so it can never age out.
+    sup.handle_request(stop("s2"))
+    storage.put("s2")
+    storage.fail = True
+    sup.request_still_stored("s2")
+    assert store.deleted_ms("s2") is None
+    now.t += 365 * DAY
+    assert sup.gc(7 * DAY) == 0 and store.result_for("s2") is not None
+
+
+def test_the_poll_reports_an_answered_request_still_in_storage_as_a_sighting(tmp_path):
+    storage, now = StandInStorage("s1"), Now()
+    sup, store, *_ = make(tmp_path, recover="eng", storage=storage, now=now)
+    sup.handle_request(stop("s1"))
+    storage.put("s1")
+    gen = sup.state.fence
+    assert sup.handle_retained(stop("s1")) is None  # not republished, not re-executed...
+    assert sup.state.fence == gen and "s1" not in storage.keys  # ...but deleted again
+
+
+def test_without_a_delete_nothing_is_marked_or_collected(tmp_path):
+    sup, store, *_ = make(tmp_path, recover="eng")
+    sup.handle_request(stop("s1"))
+    sup.now_ms = lambda: 10**12
+    assert store.deleted_ms("s1") is None and sup.gc(1) == 0 and store.result_for("s1") is not None
+
+
+def test_a_store_from_before_deletes_keeps_its_state_and_has_its_rows_swept(tmp_path):
+    import sqlite3
+
+    sup, store, *_ = make(tmp_path, recover="eng")
+    sup.handle_request(stop("s1"))
+    gen = sup.state.fence
+    store.close()
+    db = sqlite3.connect(tmp_path / "safety.sqlite")  # the ledger as it was before #279
+    db.executescript("""
+        CREATE TABLE old AS SELECT request_id, result, published, processed_ms FROM ledger;
+        DROP TABLE ledger;
+        ALTER TABLE old RENAME TO ledger;""")
+    db.commit()
+    db.close()
+    storage = StandInStorage("s1")
+    sup2, store2, *_ = make(tmp_path, storage=storage)
+    assert sup2.state.state != model.S.SAFETY_STATE_RECOVERY_REQUIRED and sup2.state.fence == gen
+    assert store2.undeleted() == ["s1"]
+    sup2.heartbeat()
+    assert "s1" not in storage.keys and store2.undeleted() == []
 
 
 def test_the_poll_only_enqueues_and_never_re_enqueues_what_is_published():
@@ -504,3 +633,12 @@ def test_a_request_that_does_not_decode_is_still_handed_to_the_loop():
     queued = []
     RetainedPoll(lambda: ["junk"], queued.append, bad).poll_once()
     assert queued == ["junk"]  # the loop refuses it and logs; the poll does not swallow it
+
+
+def test_the_poll_reports_a_known_request_as_seen_and_never_enqueues_it_again():
+    from safety_supervisor.retained import RetainedPoll
+
+    stored, queued, seen = ["a", "b"], [], []
+    p = RetainedPoll(lambda: stored, queued.append, lambda s: s, seen=seen.append)
+    p.mark_published("a")
+    assert p.poll_once() == 1 and queued == ["b"] and seen == ["a"]

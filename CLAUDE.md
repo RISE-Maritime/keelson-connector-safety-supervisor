@@ -28,7 +28,7 @@ before it is merged or run anywhere but the isolated tests.** Every commit messa
 - **Never moving while STOPPED**: her latch released while inhibiting means she is stopped again.
 - **Simulated inputs (`--sim-truth`, `--sim-inputs`, `--sim-mavlink`) are refused outside `test`.**
 - **One transaction.** The state and its ledger entry commit together. Publish after the commit;
-  mark published after publishing; garbage-collect only published entries past the retention.
+  mark published after publishing; garbage-collect only published entries whose request key was deleted, past the retention counted from that delete (a sighting in storage voids it, #279).
 - **Pure decisions.** `safety_supervisor/model.py` has no clock, no store and no Zenoh. Every
   decision is tested there.
 - **Tests never touch a network.** The e2e runs on loopback with multicast scouting off on both

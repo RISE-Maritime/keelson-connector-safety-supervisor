@@ -9,6 +9,9 @@ STOP published while it was partitioned -- alive, never hearing the live publish
 - NO GROWING LOAD (review A3). A request the loop has seen answered and published is remembered by
   id (`published`), and the poll never enqueues it again. The loop still decides everything else
   through the ledger.
+- A SIGHTING IS STILL REPORTED (crowsnest-dev#279). An answered request is deleted from storage once
+  its result is out, so one that the poll still finds was not deleted: `seen(request_id)` tells the
+  loop, which deletes it again and restarts its retention. The load is the keys that linger.
 
 `get()` and `enqueue()` are injected, so this has no Zenoh and the tests drive `poll_once`.
 """
@@ -22,11 +25,12 @@ log = logging.getLogger(__name__)
 
 
 class RetainedPoll:
-    def __init__(self, get, enqueue, request_id_of, period_s: float = 5.0):
+    def __init__(self, get, enqueue, request_id_of, period_s: float = 5.0, seen=None):
         self._get = get  # () -> iterable of samples
         self._enqueue = enqueue  # (sample) -> None
         self._request_id_of = request_id_of  # (sample) -> str | None
         self.period_s = period_s
+        self._seen = seen  # (request_id) -> None: an answered request still in storage
         self._published: set[str] = set()
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -49,6 +53,8 @@ class RetainedPoll:
             if not known:
                 self._enqueue(sample)
                 n += 1
+            elif self._seen is not None:
+                self._seen(rid)
         return n
 
     def start(self) -> RetainedPoll:

@@ -132,10 +132,25 @@ this (crowsnest-dev #86). Ted and I reviewed it on 2026-11-04 and settled these 
 - **Off the decision loop.** The GET runs on its own thread and only enqueues, so a slow router
   cannot delay a live STOP.
 - **No growing load.** A request seen answered and published is never enqueued again.
-- **The ledger is never collected by default** (`--retention-days 0`). Storage keeps every request,
-  because nothing deletes an answered one yet. A ledger row collected before its request leaves
-  storage would make that request look new: a STOP from last week would execute again. Set a
-  retention only once answered requests are deleted from storage.
+- **An answered request leaves storage** (the protocol's `gc`, crowsnest-dev#279). Once its result is
+  committed, published and marked published, the supervisor deletes its `emergency_request` key, and
+  storage keeps a tombstone. Ted decided the details on 2026-11-06:
+  - **Deleted means the call returned.** Zenoh acknowledges no delete, and an empty storage GET looks
+    exactly like a timed-out one, so absence is never "confirmed". Instead it **self-heals**: the
+    retained poll still reads storage, and any answered request it finds there is deleted again, with
+    its retention clock voided.
+  - **A delete that raised is never marked deleted.** It is retried at every heartbeat, and its row
+    is never collected. Read back meanwhile, the request is answered from the ledger and never
+    executed again.
+  - **The retention counts from the delete** (`--retention-days`), which is "replayed after its
+    tombstone" in the protocol's words. A ledger row is collected only once it is published, its key
+    deleted, and the retention has passed since.
+  - **The default is still 0, never collect**, because the retention is deployment configuration.
+    A deployment sets it longer than any partition the vessel may sail through: **7 days** is a
+    reasonable start. A collected row whose request then reappears would execute again, and the
+    self-heal makes that need a key that lingers unseen for the whole retention.
+  - A store from before this keeps its state (no schema bump). Its answered rows have no delete
+    recorded, so the first heartbeat deletes their keys.
 - **A RESET lost in a partition can land when it heals,** minutes later. That is the protocol's
   "any order, against the current fence": a STOP in between makes it stale, and a RESET re-arms
   nothing, so she turns CLEAR and stays stopped until somebody arms her.

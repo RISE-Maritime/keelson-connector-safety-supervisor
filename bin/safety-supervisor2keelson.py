@@ -71,7 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--actuator-timeout-s", type=float, default=2.0, help="timeout of one actuator call")
     p.add_argument("--heartbeat-s", type=float, default=5.0, help="safety_state heartbeat period (default 5 s)")
     p.add_argument("--retention-days", type=float, default=0.0,
-                   help="ledger anti-replay retention; 0 (the default) never collects -- storage keeps every request (README)")
+                   help="ledger anti-replay retention, counted from the answered request's delete from storage; "
+                        "0 (the default) never collects (README)")
     p.add_argument("--boot-get-timeout-s", type=float, default=5.0, help="timeout of the boot GET of retained requests")
     p.add_argument("--retained-poll-s", type=float, default=5.0,
                    help="re-read the retained requests this often: a STOP published while partitioned still lands (default 5 s)")
@@ -192,8 +193,14 @@ def main() -> int:
             actuator = LoggingActuator()
 
         projections = Projections(store)
+        def delete_request(request_id):
+            # The protocol's `gc`: an answered request leaves storage (a tombstone stays), so the ledger can
+            # be collected after the retention without a stored request coming back as new (#279).
+            session.delete(f"{base}/emergency_request/{vessel}/{request_id}")
+
         sup = Supervisor(store=store, vessel_id=vessel, policy=policy, projections=projections,
-                         publish_state=publish_state, publish_result=publish_result, actuator=actuator)
+                         publish_state=publish_state, publish_result=publish_result, actuator=actuator,
+                         delete_request=delete_request)
         sup.boot(inputs.read(), recover_operator=args.recover_locally)
         log.info("booted: %s, fence %s/%s", keelson.payloads.SafetyState_pb2.SafetyState.State.Name(sup.state.state),
                  sup.state.fence.term[:8], sup.state.fence.generation)
@@ -226,7 +233,8 @@ def main() -> int:
             return [r.ok for r in session.get(keys["requests"], timeout=1.0) if r.ok is not None]
 
         poll = RetainedPoll(retained_get, lambda s: events.put(("retained", s)),
-                            lambda s: _decode(s, EmergencyRequest).request_id, period_s=args.retained_poll_s).start()
+                            lambda s: _decode(s, EmergencyRequest).request_id, period_s=args.retained_poll_s,
+                            seen=lambda rid: events.put(("seen", rid))).start()
 
         with declare_liveliness(session, realm, vessel, args.source_id, pubsub_subjects=["safety_state", "safety_processed_request"]), \
                 GracefulShutdown() as shutdown:
@@ -244,6 +252,8 @@ def main() -> int:
                         sup.handle_retained(req)
                         if req.request_id and store.is_published(req.request_id):
                             poll.mark_published(req.request_id)
+                    elif kind == "seen":
+                        sup.request_still_stored(sample)  # answered, yet still in storage: delete it again
                     elif kind == "assignment":
                         projections.on_command_assignment(_decode(sample, CommandAssignment), policy)
                     elif kind == "conn":

@@ -29,7 +29,8 @@ def wall_ms() -> int:
 
 class Supervisor:
     def __init__(self, *, store, vessel_id: str, policy, projections, publish_state: Callable[[State], None],
-                 publish_result: Callable[[Result], None], actuator, now_ms: Callable[[], int] = wall_ms):
+                 publish_result: Callable[[Result], None], actuator, now_ms: Callable[[], int] = wall_ms,
+                 delete_request: Callable[[str], None] | None = None):
         self.store = store
         self.vessel_id = vessel_id
         self.policy = policy
@@ -38,6 +39,9 @@ class Supervisor:
         self._publish_result = publish_result
         self.actuator = actuator
         self.now_ms = now_ms
+        # Removes an answered request's key from storage (protocol action `gc`, crowsnest-dev#279); raises on
+        # failure. None deletes nothing, so nothing is ever marked deleted and no ledger row is collected.
+        self._delete_request = delete_request
         self.state: State | None = None
 
     # ------------------------------------------------------------------ boot
@@ -92,12 +96,32 @@ class Supervisor:
 
     def handle_retained(self, req: Request) -> Result | None:
         """A request read back from storage by the periodic poll. One already answered AND published
-        is skipped silently: the poll must not republish every old result every period. Anything
-        else goes through `handle_request`, so the ledger still decides (an unpublished result is
-        republished; an unknown request is processed once)."""
+        is not republished -- the poll must not republish every old result every period -- but it is
+        still IN STORAGE, so it is a sighting (`request_still_stored`). Anything else goes through
+        `handle_request`, so the ledger still decides (an unpublished result is republished; an
+        unknown request is processed once)."""
         if req.request_id and self.store.is_published(req.request_id):
+            self.request_still_stored(req.request_id)
             return None
         return self.handle_request(req)
+
+    def request_still_stored(self, request_id: str) -> None:
+        """An answered request seen in storage after (or without) its delete. It was not deleted after
+        all: its retention clock is void, and it is deleted again. So a key that lingers can never age
+        its ledger row out -- the row that keeps a week-old STOP from executing again (#279)."""
+        if not self.store.is_published(request_id):
+            return
+        if self.store.deleted_ms(request_id) is not None:
+            log.warning("answered request %s is still in storage: deleting it again, its retention restarts", request_id)
+        self.store.stored_again(request_id)
+        self._delete(request_id)
+
+    def sweep_deletes(self) -> int:
+        """Retry every answered request whose key is not known deleted (a delete that raised, or a row
+        from before deletes existed). Returns how many are still not deleted."""
+        for rid in self.store.undeleted():
+            self._delete(rid)
+        return len(self.store.undeleted())
 
     def handle_requests(self, requests: Iterable[Request]) -> None:
         """Retained requests at boot, in any order: a STOP always lands; a RESET is judged against
@@ -144,12 +168,14 @@ class Supervisor:
     def heartbeat(self) -> None:
         self._actuate()  # an actuator that did not land retries here
         self._publish_state(self.state)
+        self.sweep_deletes()  # a request key whose delete failed retries here
 
     def gc(self, retention_ms: int) -> int:
-        """Collect published ledger rows older than the retention. `retention_ms <= 0` NEVER collects,
-        and it is the default (joint review of 130fd57, A1). Storage keeps every request until answered
-        requests are deleted from it, which nothing does yet. A ledger row collected before its request
-        leaves storage makes that request look new: a STOP from last week would execute again."""
+        """Collect ledger rows whose request key was deleted more than `retention_ms` ago.
+        `retention_ms <= 0` NEVER collects, and it is the default (joint review of 130fd57, A1). A row
+        collected while its request is still in storage makes that request look new: a STOP from last
+        week would execute again. So only a deleted key starts the clock, and any later sighting of
+        it in storage restarts it (`request_still_stored`, #279)."""
         if retention_ms <= 0:
             return 0
         return self.store.gc(self.now_ms(), retention_ms)
@@ -157,8 +183,23 @@ class Supervisor:
     # ------------------------------------------------------------------ internals
 
     def _send_result(self, result: Result) -> None:
+        """Publish, mark published, THEN delete the request key: never before the result is out (protocol
+        action `gc`). A repeat of the request republishes and deletes it again."""
         self._publish_result(result)
         self.store.mark_published(result.request_id)
+        self._delete(result.request_id)
+
+    def _delete(self, request_id: str) -> None:
+        """Delete the request key; mark it deleted only when the call returned. A failure is retried at
+        the heartbeat and leaves the row uncollectable."""
+        if self._delete_request is None or not self.store.is_published(request_id):
+            return
+        try:
+            self._delete_request(request_id)
+        except Exception as e:  # noqa: BLE001 - any failure is a key still in storage
+            log.warning("could not delete answered request %s from storage (%s): retrying at the heartbeat", request_id, e)
+            return
+        self.store.mark_deleted(request_id, self.now_ms())
 
     def _actuate(self) -> None:
         self.actuator.apply(model.inhibiting(self.state), self.state.why)
