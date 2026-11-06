@@ -9,10 +9,10 @@ ledger guarantees that a request never executes twice.
 - **Design:** crowsnest-dev `docs/COMMAND-ARCHITECTURE.md` §3.
 
 > **Status: a real vessel is out of scope; a Slipway vessel is not.**
-> - **Actuation:** a logging actuator, or the **SIL** one (`--actuator slipway`), which stops a
->   simulated vessel. Each real interface (propulsion inhibit, safe state, local hold, shutdown, a
->   physical output; MAVLink force-disarm for the drone case) is its own change, with its own
->   safety review.
+> - **Actuation:** a logging actuator, or a **SIL** one: `--actuator slipway` stops a simulated
+>   vessel, `--actuator mavlink` force-disarms the SITL drone over the supervisor's own link. Each
+>   real interface (propulsion inhibit, safe state, local hold, shutdown, a physical output; MAVLink
+>   force-disarm on a real vehicle) is its own change, with its own safety review.
 > - **Never** run this against a real vessel or a shared network.
 
 ## What it does, and only that
@@ -48,14 +48,20 @@ Minimal, and simpler than what it protects (protocol inv. 15):
   makes it clearable, and then a RESET clears it.
 - **The local lockout** adds `LOCKOUT` and sets `local_lockout`. No remote role clears it.
   Clearing it locally removes its own cause and re-arms nothing (I14). Both the stop and the lockout
-  are **simulated**, and the state says `lockout_simulated`. They come from one of two sources:
+  are **simulated**, and the state says `lockout_simulated`. They come from one of three sources:
   - a local file (`--sim-inputs`);
   - **Slipway's truth record** (`--sim-truth`), which carries her `set_lockout` switch (Slipway
     ADR-0140). In SIL the simulator is the hardware: this is what the `operational` profile's
     hardware inhibit stands in for. Silence never releases it. The last reading stands, and a
     silent record is logged.
+  - **The SITL drone's key switch** (`--sim-mavlink URL`, crowsnest-dev#268): her RC9 (`--sim-mavlink-rc-channel`),
+    at or above 1700 µs (`--sim-mavlink-rc-high-us`) is the key turned. It is read over the supervisor's
+    **own** MAVLink link to the autopilot (the SITL's spare serial port, e.g. `tcp:127.0.0.1:5763`; its
+    own system id 250), never through mavlink2keelson: the SIL stand-in for a key wired into the
+    supervisor. A "no RC" value (0, 65535, or RC9 absent before any RC input) is no reading, and silence
+    never releases it. Needs the `sitl` extra (pymavlink).
 
-  **Both simulated inputs are refused outside the `test` profile.** The truth record is an
+  **Every simulated input is refused outside the `test` profile.** The truth record is an
   ordinary key, so anyone who can publish on the bus can forge `lockout: false`. "No remote role
   clears it" (I14) therefore holds here only as far as the bus is trusted. The real guarantee is
   the operational profile's hardware inhibit.
@@ -87,6 +93,12 @@ Minimal, and simpler than what it protects (protocol inv. 15):
     The worker calls `emergency_stop` again and publishes an `alarm`. She is never left moving
     while `safety_state` says STOPPED.
   - It refuses to start outside the `test` profile, or without `--sim-truth`.
+- **The SITL drone's actuator** (`--actuator mavlink`, crowsnest-dev#268): an inhibit **force-disarms**
+  her over the same own link (`MAV_CMD_COMPONENT_ARM_DISARM`, param2 21196: what mavlink2keelson's
+  `emergency_stop` sends a boat) and waits for her `COMMAND_ACK`. The same contract as the Slipway one:
+  its own thread, retried until ACCEPTED, a release calls nothing. Her armed flag in HEARTBEAT, over the
+  same link, is her latch: **armed while it inhibits, she is disarmed again** and an `alarm` is published.
+  It refuses to start outside the `test` profile, or without `--sim-mavlink`.
 - **The command_assignment projection** (operational RESET) **fails closed** with
   REFUSED_ASSIGNMENT_PROJECTION_UNVERIFIED unless all of these hold:
   - the feed was heard within `feed_ttl_seconds` on this process's monotonic clock;
@@ -97,7 +109,9 @@ Minimal, and simpler than what it protects (protocol inv. 15):
   A restart starts not-live until the feed is heard again. A STOP never reads it (I7′).
 
 It **never** reads the gate, the navigator or mavlink2keelson, and it never asks the authority
-manager or a station anything.
+manager or a station anything. Its own MAVLink link to a SITL autopilot (test profile only) is not
+mavlink2keelson: it is a second, independent link to the vehicle, standing in for the key and the
+output a real vessel wires into the supervisor.
 
 **Independence level L1:** its own process and Zenoh session, sharing the router and the box with
 what it protects (§3.4). Nothing here claims more.
@@ -147,6 +161,11 @@ safety-supervisor2keelson -r rise -e <vessel> --state-dir ./state \
 # against a Slipway vessel (test profile): her lockout switch, her stop latch, and her emergency_stop
 safety-supervisor2keelson -r rise -e slipway-usv-alpha --state-dir ./state --policy config/policy.json \
   --sim-truth --legacy-observe slipway --actuator slipway --connect tcp/<local router>:7447
+
+# against the SITL drone (test profile; pip install '.[sitl]'): her RC9 key switch and a forced disarm,
+# both over the supervisor's own MAVLink link to the SITL's spare serial port
+safety-supervisor2keelson -r rise -e <drone> --state-dir ./state --policy config/policy.json \
+  --sim-mavlink tcp:127.0.0.1:5763 --actuator mavlink --connect tcp/<local router>:7447
 ```
 
 ## The keelson pin

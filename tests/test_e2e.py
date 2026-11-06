@@ -299,7 +299,7 @@ def test_simulated_inputs_are_refused_outside_the_test_profile(h, tmp_path):
     policy = tmp_path / "op.json"
     policy.write_text(json.dumps({"config_revision": 1, "command_profile": "operational",
                                   "manager": {"issuer_id": "authority-manager/0", "source_id": "authority-manager"}}))
-    for flag in (["--sim-truth"], ["--sim-inputs", str(tmp_path / "in.json")]):
+    for flag in (["--sim-truth"], ["--sim-inputs", str(tmp_path / "in.json")], ["--sim-mavlink", "tcp:127.0.0.1:1"]):
         p = subprocess.run([sys.executable, str(ROOT / "bin/safety-supervisor2keelson.py"), "-r", REALM, "-e", V,
                             "--state-dir", str(tmp_path / "s"), "--policy", str(policy), "--accept-policy", *flag,
                             "--mode", "peer", "--connect", f"tcp/127.0.0.1:{h.port}"],

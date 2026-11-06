@@ -11,18 +11,22 @@ before it is merged or run anywhere but the isolated tests.** Every commit messa
   to the gate, not here.
 - **Independent.** Its own Zenoh session and its own store. It never reads the gate, the navigator
   or mavlink2keelson, and it never asks the authority manager or a station who may STOP or RESET.
+  In the `test` profile it may hold its OWN MAVLink link to a SITL autopilot (`--sim-mavlink`): a
+  second link to the vehicle, never mavlink2keelson (crowsnest-dev#268).
 - **Never less inhibited by accident:**
   - a lost, corrupt or unknown store is RECOVERY_REQUIRED, never CLEAR;
   - local recovery gives STOPPED, never CLEAR;
   - a RESET re-arms nothing;
   - with no adopted policy a STOP still lands.
-  - silence on an input (the truth record) never releases a lockout;
+  - silence on an input (the truth record, the drone's RC key) never releases a lockout, and a
+    "no RC" value is no reading;
   - a legacy stop latches on the EDGE only, and a RESET clears it (README).
 - **The Slipway actuator is SIL only**: refused outside `test` and without `--sim-truth`; a release
-  never calls anything.
+  never calls anything. **So is the MAVLink one**: refused outside `test` and without
+  `--sim-mavlink`; a release never arms her.
 - **The decision loop never waits on a vessel**: actuation runs on `ThreadedActuator`'s worker.
 - **Never moving while STOPPED**: her latch released while inhibiting means she is stopped again.
-- **Simulated inputs (`--sim-truth`, `--sim-inputs`) are refused outside `test`.**
+- **Simulated inputs (`--sim-truth`, `--sim-inputs`, `--sim-mavlink`) are refused outside `test`.**
 - **One transaction.** The state and its ledger entry commit together. Publish after the commit;
   mark published after publishing; garbage-collect only published entries past the retention.
 - **Pure decisions.** `safety_supervisor/model.py` has no clock, no store and no Zenoh. Every

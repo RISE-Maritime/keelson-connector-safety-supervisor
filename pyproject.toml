@@ -18,7 +18,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==8.3.4", "ruff==0.14.11"]
+# The SITL drone's key switch and stop over the supervisor's OWN MAVLink link (--sim-mavlink, test profile
+# only; crowsnest-dev#268). Imported only when that flag is given, so an operational image never needs it.
+sitl = ["pymavlink==2.4.47"]
+dev = ["pytest==8.3.4", "ruff==0.14.11", "pymavlink==2.4.47"]
 
 [tool.setuptools]
 packages = ["safety_supervisor"]

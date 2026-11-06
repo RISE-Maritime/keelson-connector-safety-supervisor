@@ -3,8 +3,10 @@ propulsion inhibit · predefined safe state · local hold · shutdown · a physi
 force-disarm on a second link is the drone case only.
 
 `LoggingActuator` records what an actuator would be told and moves nothing. `SlipwayLifecycleActuator`
-is the SIL one: it stops a SIMULATED vessel through her own `vehicle_lifecycle/v1 emergency_stop`.
-A real actuator for a real vessel is its own change, with its own safety review.
+is the SIL one for Slipway: it stops a SIMULATED vessel through her own `vehicle_lifecycle/v1
+emergency_stop`. `MavlinkDisarmActuator` is the SIL one for the SITL drone: a forced disarm over the
+supervisor's own MAVLink link. A real actuator for a real vessel is its own change, with its own
+safety review.
 """
 
 from __future__ import annotations
@@ -25,32 +27,20 @@ class LoggingActuator:
         log.warning("SAFETY ACTUATION (logging only, nothing moved): %s — %s", "INHIBIT" if inhibit else "inhibit released", why)
 
 
-class SlipwayLifecycleActuator:
-    """The SIL actuator: an inhibit edge calls the Slipway vessel's `vehicle_lifecycle/v1
-    emergency_stop` (Slipway ADR-0126: latched, from anyone, ACCEPTED even when already latched or
-    locked out).
+class _StopUntilAccepted:
+    """What every SIL actuator shares: an inhibit edge calls `call()` until a reply is ACCEPTED.
 
-    - Retried on every `apply` while inhibiting, until a reply is ACCEPTED: a stop that did not
-      land is not a stop.
+    - Retried on every `apply` while inhibiting, until ACCEPTED: a stop that did not land is not a stop.
     - Release calls NOTHING. A RESET re-arms nothing: she stays stopped until somebody arms her.
-    - `call()` is injected (`() -> (accepted: bool, detail: str)`), so this module stays free of
-      Zenoh; the bin builds it from the RPC key.
-    - Refused outside the `test` profile at startup (`guard`): it is a simulator's actuator.
+    - `call()` is injected (`() -> (accepted: bool, detail: str)`), so this module stays free of Zenoh
+      and of pymavlink; the bin builds it."""
 
-    Independence level L1: the supervisor's own session, sharing the router with what it protects."""
+    WHAT = "stop"
 
     def __init__(self, call):
         self._call = call
         self._landed = False
         self.calls = 0
-
-    @staticmethod
-    def guard(command_profile: str | None, sim_truth: bool) -> str | None:
-        if command_profile != "test":
-            return f"the Slipway actuator is for the test profile only, not {command_profile!r}"
-        if not sim_truth:
-            return "the Slipway actuator needs --sim-truth: it stops a simulated vessel and reads her back"
-        return None
 
     def relatch(self) -> None:
         """Her own latch was seen RELEASED while the supervisor inhibits -- somebody armed her on the
@@ -71,9 +61,47 @@ class SlipwayLifecycleActuator:
             accepted, detail = False, str(e)
         if accepted:
             self._landed = True
-            log.warning("SAFETY ACTUATION: Slipway emergency_stop ACCEPTED (%s) — %s", detail, why)
+            log.warning("SAFETY ACTUATION: %s ACCEPTED (%s) — %s", self.WHAT, detail, why)
         else:
-            log.error("SAFETY ACTUATION: Slipway emergency_stop NOT accepted (%s) — retrying", detail)
+            log.error("SAFETY ACTUATION: %s NOT accepted (%s) — retrying", self.WHAT, detail)
+
+
+class SlipwayLifecycleActuator(_StopUntilAccepted):
+    """The SIL actuator for a Slipway vessel: an inhibit edge calls her `vehicle_lifecycle/v1
+    emergency_stop` (Slipway ADR-0126: latched, from anyone, ACCEPTED even when already latched or
+    locked out). Refused outside the `test` profile at startup (`guard`): it is a simulator's actuator.
+
+    Independence level L1: the supervisor's own session, sharing the router with what it protects."""
+
+    WHAT = "Slipway emergency_stop"
+
+    @staticmethod
+    def guard(command_profile: str | None, sim_truth: bool) -> str | None:
+        if command_profile != "test":
+            return f"the Slipway actuator is for the test profile only, not {command_profile!r}"
+        if not sim_truth:
+            return "the Slipway actuator needs --sim-truth: it stops a simulated vessel and reads her back"
+        return None
+
+
+class MavlinkDisarmActuator(_StopUntilAccepted):
+    """The SIL actuator for the SITL drone (crowsnest-dev#268): an inhibit edge FORCE-DISARMS her over the
+    supervisor's own MAVLink link (mavlink_link.py: MAV_CMD_COMPONENT_ARM_DISARM, param2 21196) -- the
+    "MAVLink force-disarm on a second link" this module's header names as the drone case. Her armed
+    flag, read back over the same link, is her latch: armed while inhibiting, she is stopped again.
+
+    Refused outside the `test` profile and without `--sim-mavlink` (`guard`): it disarms a simulator.
+    Independence: its own link to the autopilot, never mavlink2keelson; still L1 (one box)."""
+
+    WHAT = "MAVLink force-disarm (own link)"
+
+    @staticmethod
+    def guard(command_profile: str | None, sim_mavlink: bool) -> str | None:
+        if command_profile != "test":
+            return f"the MAVLink actuator is for the test profile only, not {command_profile!r}"
+        if not sim_mavlink:
+            return "the MAVLink actuator needs --sim-mavlink: it disarms a SITL autopilot over its own link and reads her back"
+        return None
 
 
 class ThreadedActuator:

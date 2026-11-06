@@ -4,7 +4,9 @@
 Its OWN Zenoh session and its own store; it needs nothing else alive for a STOP to land. It reads
 `emergency_request`, `command_assignment` (the master, operational profile), the conn lease
 (test / legacy profiles) and the authority manager's liveliness; it writes `safety_state` and
-`safety_processed_request`. It never reads the gate, the navigator or mavlink2keelson.
+`safety_processed_request`. It never reads the gate, the navigator or mavlink2keelson. In the test
+profile it may hold its OWN MAVLink link to a SITL autopilot (`--sim-mavlink`): the drone's key switch
+and its stop, standing in for a key and an output wired into the supervisor (crowsnest-dev#268).
 
 Boot (protocols/emergency_request.yaml, action `restore`): restore the state or RECOVERY_REQUIRED →
 add what the inputs prove → republish unpublished results → declare the subscribers (they only
@@ -29,8 +31,8 @@ from keelson.scaffolding.signals import GracefulShutdown
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from safety_supervisor import codec
-from safety_supervisor.actuation import LoggingActuator, SlipwayLifecycleActuator, ThreadedActuator
-from safety_supervisor.inputs import NoInputs, SimulatedInputs, TruthInputs
+from safety_supervisor.actuation import LoggingActuator, MavlinkDisarmActuator, SlipwayLifecycleActuator, ThreadedActuator
+from safety_supervisor.inputs import MavlinkRcInputs, NoInputs, SimulatedInputs, TruthInputs
 from safety_supervisor.policy import resolve
 from safety_supervisor.projection import Projections
 from safety_supervisor.retained import RetainedPoll
@@ -55,10 +57,16 @@ def build_parser() -> argparse.ArgumentParser:
     sim.add_argument("--sim-inputs", type=pathlib.Path, help="test profile: JSON {physical_stop, lockout} simulating the onboard inputs")
     sim.add_argument("--sim-truth", action="store_true",
                      help="test profile: read the lockout (and, with --legacy-observe slipway, her stop latch) from Slipway's truth record")
+    sim.add_argument("--sim-mavlink", metavar="URL",
+                     help="test profile: the SITL drone's key switch (an RC channel) over the supervisor's OWN MAVLink link, "
+                          "e.g. tcp:127.0.0.1:5763 (the `sitl` extra)")
     p.add_argument("--truth-ttl-s", type=float, default=5.0, help="log when the truth record is silent this long (it never releases)")
+    p.add_argument("--sim-mavlink-rc-channel", type=int, default=9, help="the drone's lockout key: this RC channel (default 9)")
+    p.add_argument("--sim-mavlink-rc-high-us", type=int, default=1700, help="a pulse at or above this many µs is the key turned (default 1700)")
     p.add_argument("--legacy-observe", metavar="slipway|mavlink:<source_id>",
                    help="observe legacy stops: Slipway's truth-record latch, or a MAVLink vehicle_armed source")
-    p.add_argument("--actuator", choices=["logging", "slipway"], default="logging", help="safety actuation (default: logging only)")
+    p.add_argument("--actuator", choices=["logging", "slipway", "mavlink"], default="logging",
+                   help="safety actuation (default: logging only; mavlink = force-disarm over the --sim-mavlink link)")
     p.add_argument("--slipway-responder-id", default="sim", help="the Slipway vessel's vehicle_lifecycle/v1 responder (default sim)")
     p.add_argument("--actuator-timeout-s", type=float, default=2.0, help="timeout of one actuator call")
     p.add_argument("--heartbeat-s", type=float, default=5.0, help="safety_state heartbeat period (default 5 s)")
@@ -99,7 +107,10 @@ def main() -> int:
     else:
         log.info("policy revision %s, profile %s", policy.config_revision, policy.command_profile)
     truth = TruthInputs(ttl_ms=int(args.truth_ttl_s * 1000)) if args.sim_truth else None
-    inputs = truth or (SimulatedInputs(args.sim_inputs) if args.sim_inputs else NoInputs())
+    rc = (MavlinkRcInputs(args.sim_mavlink_rc_channel, args.sim_mavlink_rc_high_us, ttl_ms=int(args.truth_ttl_s * 1000))
+          if args.sim_mavlink else None)
+    clocked = truth or rc  # the inputs whose `read` takes the monotonic now
+    inputs = clocked or (SimulatedInputs(args.sim_inputs) if args.sim_inputs else NoInputs())
     legacy = args.legacy_observe
     if legacy and legacy != "slipway" and not legacy.startswith("mavlink:"):
         log.error("--legacy-observe must be 'slipway' or 'mavlink:<source_id>'")
@@ -109,12 +120,17 @@ def main() -> int:
         return 2
     # Review B (2026-11-04): a simulated input is a remotely writable key or a local file standing in
     # for hardware -- a forged truth record can clear a lockout. Never outside the test profile.
-    if (args.sim_truth or args.sim_inputs) and (policy is None or policy.command_profile != "test"):
-        log.error("refusing to start: --sim-truth / --sim-inputs are for the test profile only (profile %r)",
+    if (args.sim_truth or args.sim_inputs or args.sim_mavlink) and (policy is None or policy.command_profile != "test"):
+        log.error("refusing to start: --sim-truth / --sim-inputs / --sim-mavlink are for the test profile only (profile %r)",
                   policy.command_profile if policy else None)
         return 2
     if args.actuator == "slipway":
         refusal = SlipwayLifecycleActuator.guard(policy.command_profile if policy else None, args.sim_truth)
+        if refusal:
+            log.error("refusing to start: %s", refusal)
+            return 2
+    if args.actuator == "mavlink":
+        refusal = MavlinkDisarmActuator.guard(policy.command_profile if policy else None, bool(args.sim_mavlink))
         if refusal:
             log.error("refusing to start: %s", refusal)
             return 2
@@ -134,6 +150,22 @@ def main() -> int:
             session.put(f"{keys['result']}/{r.request_id}",
                         keelson.enclose(codec.result_to_pb(r, vessel_id=vessel, supervisor_id=args.supervisor_id).SerializeToString()))
 
+        from keelson.payloads.Alarm_pb2 import Alarm
+
+        def on_rearmed(why):
+            session.put(f"{base}/alarm/{args.source_id}", keelson.enclose(Alarm(
+                identifier=f"{args.source_id}/rearmed-while-stopped",
+                description=f"{vessel} was armed on the legacy path while safety_state inhibits ({why}): stopped again",
+                category=Alarm.Category.CATEGORY_SAFETY, priority=Alarm.Priority.PRIORITY_WARNING).SerializeToString()))
+
+        link = None
+        if args.sim_mavlink:
+            from safety_supervisor.mavlink_link import MavlinkLink  # the `sitl` extra (pymavlink)
+
+            # Only reports; the decision loop decides (the subscribers' rule).
+            link = MavlinkLink(args.sim_mavlink, rc_channel=args.sim_mavlink_rc_channel,
+                               on_rc=lambda pwm: events.put(("rc", pwm)), on_armed=lambda armed: events.put(("link_armed", armed))).start()
+
         if args.actuator == "slipway":
             from keelson.interfaces.VehicleCommon_pb2 import CommandResult
             from keelson.interfaces.VehicleLifecycle_pb2 import EmergencyStopRequest, EmergencyStopResponse
@@ -149,16 +181,13 @@ def main() -> int:
                     return resp.result == CommandResult.COMMAND_RESULT_ACCEPTED, resp.detail or CommandResult.Name(resp.result)
                 return False, f"no answer from {args.slipway_responder_id} within {args.actuator_timeout_s} s"
 
-            from keelson.payloads.Alarm_pb2 import Alarm
-
-            def on_rearmed(why):
-                session.put(f"{base}/alarm/{args.source_id}", keelson.enclose(Alarm(
-                    identifier=f"{args.source_id}/rearmed-while-stopped",
-                    description=f"{vessel} was armed on the legacy path while safety_state inhibits ({why}): stopped again",
-                    category=Alarm.Category.CATEGORY_SAFETY, priority=Alarm.Priority.PRIORITY_WARNING).SerializeToString()))
-
             actuator = ThreadedActuator(SlipwayLifecycleActuator(call_emergency_stop), on_rearmed=on_rearmed).start()
             log.warning("SIL actuator: an accepted STOP calls %s's vehicle_lifecycle/v1 emergency_stop (off the decision loop)", vessel)
+        elif args.actuator == "mavlink":
+            actuator = ThreadedActuator(MavlinkDisarmActuator(lambda: link.force_disarm(args.actuator_timeout_s)),
+                                        on_rearmed=on_rearmed).start()
+            log.warning("SIL actuator: an inhibit force-disarms %s over the own MAVLink link %s (off the decision loop)",
+                        vessel, args.sim_mavlink)
         else:
             actuator = LoggingActuator()
 
@@ -230,9 +259,15 @@ def main() -> int:
                     elif kind == "armed":
                         armed = codec.vehicle_armed(keelson.uncover(sample.payload.to_bytes())[2])
                         sup.on_vehicle_stopped(legacy, not armed)
+                    elif kind == "rc":
+                        rc.on_rc(sample, int(time.monotonic() * 1000))
+                    elif kind == "link_armed":
+                        # Her armed flag over the own link is her latch: armed while inhibiting, stop her again.
+                        if isinstance(actuator, ThreadedActuator):
+                            actuator.vessel_latch(not sample)
                 except Exception:  # pylint: disable=broad-except
                     log.exception("could not handle a %s sample", kind)
-                sup.on_inputs(truth.read(int(time.monotonic() * 1000)) if truth is not None else inputs.read())
+                sup.on_inputs(clocked.read(int(time.monotonic() * 1000)) if clocked is not None else inputs.read())
                 now = time.monotonic()
                 if now - last_hb >= args.heartbeat_s:
                     sup.heartbeat()
@@ -243,6 +278,8 @@ def main() -> int:
         poll.close()
         if isinstance(actuator, ThreadedActuator):
             actuator.close()  # before the session it calls through is closed
+        if link is not None:
+            link.close()
         for s in subs:
             s.undeclare()
     store.close()

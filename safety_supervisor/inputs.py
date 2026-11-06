@@ -85,3 +85,33 @@ class TruthInputs:
             self._warned = True
         return Reading(False, self._lockout, simulated=True)
 
+
+class MavlinkRcInputs:
+    """The SITL drone's key switch (crowsnest-dev#268): her RC channel `channel` (RC9 by default), read
+    over the supervisor's OWN MAVLink link (mavlink_link.py). A pulse at or above `high_us` is the key
+    turned: locked out. Labelled simulated, like every SIL input.
+
+    SILENCE NEVER RELEASES, as for the truth record: between readings, or after the link is lost, the
+    last reading stands; "no RC" values never arrive here (the link drops 0 / 65535). Fed by the bin's
+    queue (`on_rc`); the decision loop calls `read`."""
+
+    def __init__(self, channel: int = 9, high_us: int = 1700, ttl_ms: int = 5000):
+        self.channel, self.high_us, self.ttl_ms = channel, high_us, ttl_ms
+        self._lockout = False
+        self._heard_ms: int | None = None
+        self._warned = False
+
+    def on_rc(self, pwm_us: int, now_ms: int) -> None:
+        self._lockout = int(pwm_us) >= self.high_us
+        self._heard_ms = now_ms
+        self._warned = False
+
+    def stale(self, now_ms: int) -> bool:
+        return self._heard_ms is None or now_ms - self._heard_ms > self.ttl_ms
+
+    def read(self, now_ms: int | None = None) -> Reading:
+        if now_ms is not None and self._heard_ms is not None and self.stale(now_ms) and not self._warned:
+            log.error("the drone's RC%d is silent (> %d ms): keeping the last lockout reading", self.channel, self.ttl_ms)
+            self._warned = True
+        return Reading(False, self._lockout, simulated=True)
+
