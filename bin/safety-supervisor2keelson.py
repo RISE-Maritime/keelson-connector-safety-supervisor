@@ -153,6 +153,11 @@ def main() -> int:
 
         from keelson.payloads.Alarm_pb2 import Alarm
 
+        def raise_alarm(identifier, description):
+            session.put(f"{base}/alarm/{args.source_id}", keelson.enclose(Alarm(
+                identifier=f"{args.source_id}/{identifier}", description=description,
+                category=Alarm.Category.CATEGORY_SAFETY, priority=Alarm.Priority.PRIORITY_WARNING).SerializeToString()))
+
         def on_rearmed(why):
             session.put(f"{base}/alarm/{args.source_id}", keelson.enclose(Alarm(
                 identifier=f"{args.source_id}/rearmed-while-stopped",
@@ -207,7 +212,9 @@ def main() -> int:
 
         # Subscribers first; they only enqueue. One loop below decides.
         subs = [
-            session.declare_subscriber(keys["requests"], lambda s: events.put(("request", s))),
+            # A DELETE here is a tombstone -- this supervisor's own, for an answered request (#279) -- never a
+            # request: decoded, it is an empty EmergencyRequest that logs as malformed on every answer.
+            session.declare_subscriber(keys["requests"], lambda s: events.put(("request", s)) if s.kind != zenoh.SampleKind.DELETE else None),
             session.declare_subscriber(keys["assignment"], lambda s: events.put(("assignment", s))),
             session.declare_subscriber(keys["conn"], lambda s: events.put(("conn", s))),
         ]
@@ -218,6 +225,11 @@ def main() -> int:
         if policy and policy.manager_source_id:
             mkey = keelson.construct_source_liveliness_key(realm, vessel, policy.manager_source_id)
             subs.append(session.liveliness().declare_subscriber(mkey, history=True, handler=lambda s: events.put(("manager", s))))
+        if policy is not None and policy.envelope_watchdog_source_id:
+            # A dead envelope watchdog also stops re-sending, which would make its cause clearable while
+            # she may still be outside a limit (#291). So its going away is an alarm, never silent.
+            wkey = keelson.construct_source_liveliness_key(realm, vessel, policy.envelope_watchdog_source_id)
+            subs.append(session.liveliness().declare_subscriber(wkey, history=True, handler=lambda s: events.put(("watchdog", s))))
 
         # Retained requests: a STOP published while this process was down must still land.
         retained = 0
@@ -260,6 +272,14 @@ def main() -> int:
                         projections.on_conn_lease(_decode(sample, CommandAuthority))
                     elif kind == "manager":
                         projections.on_manager_liveliness(sample.kind == zenoh.SampleKind.PUT)
+                    elif kind == "watchdog":
+                        if sample.kind == zenoh.SampleKind.DELETE:
+                            log.error("the envelope watchdog %s is gone", policy.envelope_watchdog_source_id)
+                            raise_alarm("envelope-watchdog-lost",
+                                        f"the envelope watchdog {policy.envelope_watchdog_source_id} is gone: no hard limit is "
+                                        "watched, and an ENVELOPE cause it raised becomes clearable after its hold")
+                        else:
+                            log.info("the envelope watchdog %s is up", policy.envelope_watchdog_source_id)
                     elif kind == "truth":
                         truth.on_truth(codec.truth_record(keelson.uncover(sample.payload.to_bytes())[2]), int(time.monotonic() * 1000))
                         if legacy == "slipway" and truth.estop() is not None:

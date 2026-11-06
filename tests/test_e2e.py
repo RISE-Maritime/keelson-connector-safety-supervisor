@@ -73,7 +73,7 @@ class Harness:
         zcfg.write_text(json.dumps({"mode": "peer", "scouting": {"multicast": {"enabled": False}, "gossip": {"enabled": False}},
                                     "connect": {"endpoints": [f"tcp/127.0.0.1:{self.port}"]}, "listen": {"endpoints": []}}))
         policy = self.tmp / "policy.json"
-        policy.write_text(json.dumps({"config_revision": 1, "command_profile": "test"}))
+        policy.write_text(json.dumps({"config_revision": 1, "command_profile": "test", **getattr(self, "policy_extra", {})}))
         self.proc = subprocess.Popen(
             [sys.executable, str(ROOT / "bin/safety-supervisor2keelson.py"), "-r", REALM, "-e", V, "--zenoh-config", str(zcfg),
              "--state-dir", str(self.tmp / "state"), "--policy", str(policy), "--heartbeat-s", "0.5", *extra],
@@ -346,3 +346,30 @@ def test_a_vessel_that_never_answers_does_not_delay_the_stops_state(h):
     r = h.request(EmergencyCommand.EMERGENCY_COMMAND_STOP)
     assert r.outcome == SafetyRequestOutcome.SAFETY_REQUEST_OUTCOME_ACCEPTED
     assert time.time() - t0 < 2.0, "the result waited on the unanswered actuator"
+
+
+def test_an_envelope_watchdogs_stop_is_envelope_and_its_loss_is_an_alarm(h):
+    """#291: the CLI with a policy naming the watchdog. Its STOP is CAUSE_TYPE_ENVELOPE on safety_state, and
+    its liveliness token going away raises an alarm: a dead watchdog also stops re-sending."""
+    alarms = []
+    sub = h.session.declare_subscriber(f"{BASE}/alarm/**", lambda s: alarms.append(str(s.key_expr)))
+    token = h.session.liveliness().declare_token(keelson.construct_source_liveliness_key(REALM, V, "envelope-watchdog"))
+    try:
+        h.policy_extra = {"envelope": {"trippers": ["envelope-watchdog/*@*"], "hold_ms": 3000, "watchdog_source_id": "envelope-watchdog"}}
+        h.start("--accept-policy", "--recover-locally", "engineer-on-board")
+        r = h.request(EmergencyCommand.EMERGENCY_COMMAND_STOP, who="envelope-watchdog/0@" + V)
+        assert r.outcome == SafetyRequestOutcome.SAFETY_REQUEST_OUTCOME_ACCEPTED
+        from keelson.payloads.SafetyState_pb2 import SafetyCause
+
+        h.wait(lambda: any(c.type == SafetyCause.Type.CAUSE_TYPE_ENVELOPE and not c.clearable_remotely
+                           for c in h.states[-1].active_causes), what="an ENVELOPE cause on safety_state")
+        human = h.request(EmergencyCommand.EMERGENCY_COMMAND_STOP)
+        assert any(c.type == SafetyCause.Type.CAUSE_TYPE_SAFETY_TRIP and c.source == "ted@ROC-1" for c in human.remaining_causes)
+        assert not alarms
+        token.undeclare()
+        token = None
+        h.wait(lambda: any("safety-supervisor" in k for k in alarms), what="the watchdog-lost alarm")
+    finally:
+        if token is not None:
+            token.undeclare()
+        sub.undeclare()

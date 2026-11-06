@@ -135,6 +135,8 @@ class Supervisor:
         now = self.now_ms()
         st = model.apply_physical_stop(self.state, reading.physical_stop, now)
         st = model.apply_lockout(st, reading.lockout, now, simulated=reading.simulated)
+        # An envelope watchdog that has stopped re-sending its STOP: its cause becomes clearable (#291).
+        st = model.age_envelope(st, now, self.policy.envelope_hold_ms if self.policy is not None else 3000)
         if st is self.state:
             return
         self.store.commit(st)

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from keelson.payloads.CommandAuthority_pb2 import Role
 from keelson.payloads.SafetyState_pb2 import SafetyRequestOutcome as O
 
-from .model import Authorisation, Request
+from .model import C, Authorisation, Request
 from .policy import Policy
 
 # The protocol's default SAFETY_TRIP policy (humans at a site yes, processes no), used for a STOP
@@ -98,6 +98,8 @@ class Projections:
             return Authorisation(DEFAULT_POLICY.may_trip(req.controller_id), O.SAFETY_REQUEST_OUTCOME_REFUSED_UNAUTHORISED,
                                  "no adopted safety policy")
         may_trip = policy.may_trip(req.controller_id)
+        if req.command == C.EMERGENCY_COMMAND_STOP and policy.is_envelope_tripper(req.controller_id):
+            return Authorisation(may_trip, None, envelope=True)
         if policy.command_profile == "operational":
             o = self.overall
             if not self.assignment_live() or o.issuer_id != policy.manager_issuer_id:

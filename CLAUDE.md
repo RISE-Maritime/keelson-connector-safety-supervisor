@@ -29,6 +29,8 @@ before it is merged or run anywhere but the isolated tests.** Every commit messa
 - **Simulated inputs (`--sim-truth`, `--sim-inputs`, `--sim-mavlink`) are refused outside `test`.**
 - **One transaction.** The state and its ledger entry commit together. Publish after the commit;
   mark published after publishing; garbage-collect only published entries whose request key was deleted, past the retention counted from that delete (a sighting in storage voids it, #279).
+- **An ENVELOPE cause never clears while its watchdog keeps re-sending** (#291): only after `envelope.hold_ms` of
+  quiet, and then only by a RESET. A re-send refreshes the cause in place and moves no generation.
 - **Pure decisions.** `safety_supervisor/model.py` has no clock, no store and no Zenoh. Every
   decision is tested there.
 - **Tests never touch a network.** The e2e runs on loopback with multicast scouting off on both

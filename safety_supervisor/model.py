@@ -59,6 +59,9 @@ class Cause:
     request_id: str | None = None
     safe_state_name: str = ""
     reason: str = ""
+    # ENVELOPE only: when the watchdog last re-sent its STOP (#291). While it keeps re-sending she is
+    # still out of her limits, and the cause stays non-clearable (`age_envelope`). Not on the wire.
+    heard_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +118,9 @@ class Authorisation:
     # ASSIGNMENT_PROJECTION_UNVERIFIED) and why.
     reset_refusal: int | None = None
     detail: str = ""
+    # The caller is a policy-named envelope watchdog: its STOP is CAUSE_TYPE_ENVELOPE (#291). LAST, so the
+    # positional Authorisation(may_trip, refusal, detail) calls keep their meaning.
+    envelope: bool = False
 
 
 def derive_state(causes) -> int:
@@ -153,6 +159,33 @@ def _with_causes(state: State, causes, now_ms: int, *, who: str, why: str) -> St
     )
 
 
+def _envelope_stop(state: State, req: Request, now_ms: int) -> tuple[State, int, str, tuple]:
+    """A STOP from a policy-named envelope watchdog (#291): CAUSE_TYPE_ENVELOPE, NOT clearable while the
+    watchdog keeps re-sending it -- she is still outside a hard limit, so a RESET is PARTIAL (Ted,
+    2026-11-06). One cause per watchdog: a re-send refreshes it in place (`heard_ms`, the reason naming
+    the latest breach) and moves no generation, because the cause set has not changed."""
+    held = next((c for c in state.causes if c.type == T.CAUSE_TYPE_ENVELOPE and c.source == req.controller_id), None)
+    if held is None:
+        cause = Cause(T.CAUSE_TYPE_ENVELOPE, req.controller_id, now_ms, False, req.request_id, reason=req.reason,
+                      heard_ms=now_ms)
+        st = _with_causes(state, (*state.causes, cause), now_ms, who=req.controller_id, why=req.reason or "envelope breached")
+    else:
+        fresh = replace(held, clearable_remotely=False, heard_ms=now_ms, reason=req.reason or held.reason)
+        st = replace(state, causes=tuple(fresh if c is held else c for c in state.causes))
+    return st, O.SAFETY_REQUEST_OUTCOME_ACCEPTED, "", st.causes
+
+
+def age_envelope(state: State, now_ms: int, hold_ms: int) -> State:
+    """An ENVELOPE cause whose watchdog has not re-sent its STOP for `hold_ms` becomes clearable: she is
+    back inside (or the watchdog is dead, which the supervisor alarms on separately). It is not cleared
+    here -- a RESET by the profile's holder does that, as for a released physical stop."""
+    aged = tuple(replace(c, clearable_remotely=True)
+                 if c.type == T.CAUSE_TYPE_ENVELOPE and not c.clearable_remotely and c.heard_ms is not None
+                 and now_ms - c.heard_ms > hold_ms else c
+                 for c in state.causes)
+    return state if aged == state.causes else replace(state, causes=aged)
+
+
 def malformed(req: Request, vessel_id: str) -> str | None:
     if not req.request_id or "/" in req.request_id or "*" in req.request_id:
         return "request_id must be one key chunk"
@@ -180,6 +213,8 @@ def apply_request(state: State, req: Request, auth: Authorisation, now_ms: int, 
         # may not trip at all under the supervisor's own policy (inv. 10).
         if not auth.may_trip:
             return answer(state, O.SAFETY_REQUEST_OUTCOME_REFUSED_UNAUTHORISED, auth.detail or "not a SAFETY_TRIP principal")
+        if auth.envelope:
+            return answer(*_envelope_stop(state, req, now_ms))
         cause = Cause(T.CAUSE_TYPE_SAFETY_TRIP, req.controller_id, now_ms, True, req.request_id, reason=req.reason)
         st = _with_causes(state, (*state.causes, cause), now_ms, who=req.controller_id, why=req.reason or "STOP")
         return answer(st, O.SAFETY_REQUEST_OUTCOME_ACCEPTED, remaining=st.causes)

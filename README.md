@@ -166,6 +166,29 @@ store only with `--accept-policy`; otherwise the persisted copy rules, and a dif
 logged and ignored. With no adopted policy, a STOP still lands on the default policy and every
 RESET is refused.
 
+## Envelope trips (crowsnest-dev#291)
+
+A separate **envelope watchdog** (`keelson-processor-envelope-watchdog`) watches her hard limits from her
+own sensors, never the navigator or `envelope_exceedance`, and sends an `EmergencyRequest` STOP like any
+other tripper. The supervisor itself measures nothing, so it stays simpler than what it protects.
+`EmergencyRequest` has no cause field: the cause follows from who sent it.
+
+- **The policy names the watchdog:**
+
+  ```json
+  "envelope": {"trippers": ["envelope-watchdog/*@*"], "hold_ms": 3000, "watchdog_source_id": "envelope-watchdog"}
+  ```
+
+  A STOP from a named tripper is **`CAUSE_TYPE_ENVELOPE`**. Anyone else's STOP stays `SAFETY_TRIP`. A
+  tripper is let STOP even though it is a process, and `safety_trip.deny` still refuses it.
+- **It does not clear while she is still out** (Ted, 2026-11-06). The watchdog re-sends its STOP while
+  the limit is breached. Each re-send refreshes the one ENVELOPE cause for that watchdog in place: the
+  reason names the latest breach, it stays non-clearable, and no generation moves. A RESET is PARTIAL.
+  Once no re-send has arrived for `hold_ms`, the cause becomes clearable (not cleared), and a RESET by
+  the profile's holder clears it, as for a released physical stop. A re-send before that holds it again.
+- **A dead watchdog is an alarm.** It too would stop re-sending. The supervisor watches the liveliness
+  of `watchdog_source_id`, and raises `alarm/{source_id}` (`…/envelope-watchdog-lost`) when it goes.
+
 ## Running (development only)
 
 ```bash
@@ -210,16 +233,4 @@ To try a build without moving the pin, `uv pip install keelson==<version>` into 
   that this only observes.
 - Slipway's side of I6 is Slipway's: its kernel refuses remote orders while this `safety_state`
   is not CLEAR, or is silent once heard (SLIPWAY ADR-0141).
-- Envelope trips. Their shape is decided (Ted, 2026-11-05, crowsnest-dev#278); the
-  implementation is crowsnest-dev#291.
-  - **A separate envelope watchdog raises them.** It runs on its own Zenoh session and reads its
-    own sensors, never the navigator or `envelope_exceedance`. It sends an `EmergencyRequest`
-    STOP like any other tripper.
-  - **This supervisor's policy names that principal as an envelope tripper,** and records
-    `CAUSE_TYPE_ENVELOPE` for its STOP. Anyone else's STOP stays `SAFETY_TRIP`.
-  - **The supervisor itself measures nothing,** so it stays simpler than what it protects. No
-    protocol change is needed: `EmergencyRequest` has no cause field, so the cause follows from
-    who sent it.
-  - **Open:** the per-vessel limits and how an ENVELOPE cause clears are #291's to settle.
-- Deleting the retained request keys once answered.
 - `maintenance_state`.

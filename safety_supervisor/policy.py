@@ -42,11 +42,20 @@ class Policy:
     manager_source_id: str = ""
     conn_ttl_s: float = 30.0
     trust_roots: tuple[str, ...] = field(default_factory=tuple)
+    # The envelope watchdog (#291): the principals whose STOP is CAUSE_TYPE_ENVELOPE, how long after its
+    # last re-sent STOP the cause becomes clearable, and the source id whose liveliness is watched.
+    envelope_trippers: tuple[str, ...] = ()
+    envelope_hold_ms: int = 3000
+    envelope_watchdog_source_id: str = ""
+
+    def is_envelope_tripper(self, controller_id: str) -> bool:
+        return any(fnmatch.fnmatchcase(controller_id, p) for p in self.envelope_trippers)
 
     def may_trip(self, controller_id: str) -> bool:
         if any(fnmatch.fnmatchcase(controller_id, p) for p in self.trip_deny):
             return False
-        return any(fnmatch.fnmatchcase(controller_id, p) for p in self.trip_allow)
+        # A named envelope watchdog is a process the policy deliberately lets trip; no other process is.
+        return self.is_envelope_tripper(controller_id) or any(fnmatch.fnmatchcase(controller_id, p) for p in self.trip_allow)
 
 
 def parse(d: dict) -> Policy:
@@ -58,6 +67,10 @@ def parse(d: dict) -> Policy:
         raise ValueError("config_revision must be a positive integer")
     trip = d.get("safety_trip") or {}
     manager = d.get("manager") or {}
+    envelope = d.get("envelope") or {}
+    hold = int(envelope.get("hold_ms", 3000))
+    if hold <= 0:
+        raise ValueError("envelope.hold_ms must be positive: a cause that is clearable at once is no hold")
     if profile == "operational" and not manager.get("issuer_id"):
         raise ValueError("the operational profile names the authorised manager (manager.issuer_id)")
     return Policy(
@@ -69,6 +82,9 @@ def parse(d: dict) -> Policy:
         manager_source_id=manager.get("source_id", ""),
         conn_ttl_s=float(d.get("conn_ttl_s", 30)),
         trust_roots=tuple(d.get("trust_roots", [])),
+        envelope_trippers=tuple(envelope.get("trippers", [])),
+        envelope_hold_ms=hold,
+        envelope_watchdog_source_id=str(envelope.get("watchdog_source_id", "")),
     )
 
 
