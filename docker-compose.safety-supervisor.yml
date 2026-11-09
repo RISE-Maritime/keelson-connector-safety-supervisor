@@ -9,6 +9,8 @@ services:
     volumes:
       - safety-state:/state
       - ./config/policy.json:/config/policy.json:ro
+      # With a real stop and lockout, add --hw-inputs /config/hw-inputs.json to the command (README).
+      # - ./config/hw-inputs.json:/config/hw-inputs.json:ro
     command: "safety-supervisor2keelson --log-level 20 -r rise -e <vessel_id> --state-dir /state --policy /config/policy.json"
 
 volumes:

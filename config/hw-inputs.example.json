@@ -1,0 +1,12 @@
+{
+  "host": "192.168.50.10",
+  "port": 502,
+  "unit": 1,
+  "poll_ms": 50,
+  "timeout_ms": 100,
+  "fault_ms": 500,
+  "release_ms": 200,
+  "boot_wait_ms": 3000,
+  "physical_stop": { "table": "discrete", "address": 0, "released": true },
+  "lockout": { "table": "discrete", "address": 1, "released": true }
+}

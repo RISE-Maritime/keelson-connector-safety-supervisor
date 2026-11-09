@@ -18,7 +18,7 @@ before it is merged or run anywhere but the isolated tests.** Every commit messa
   - local recovery gives STOPPED, never CLEAR;
   - a RESET re-arms nothing;
   - with no adopted policy a STOP still lands.
-  - silence on an input (the truth record, the drone's RC key) never releases a lockout, and a
+  - silence on a simulated input (the truth record, the drone's RC key) never releases a lockout, and a
     "no RC" value is no reading;
   - a legacy stop latches on the EDGE only, and a RESET clears it (README).
 - **The Slipway actuator is SIL only**: refused outside `test` and without `--sim-truth`; a release
@@ -27,6 +27,9 @@ before it is merged or run anywhere but the isolated tests.** Every commit messa
 - **The decision loop never waits on a vessel**: actuation runs on `ThreadedActuator`'s worker.
 - **Never moving while STOPPED**: her latch released while inhibiting means she is stopped again.
 - **Simulated inputs (`--sim-truth`, `--sim-inputs`, `--sim-mavlink`) are refused outside `test`.**
+- **A real input's silence stops her** (`--hw-inputs`, #277): an unreadable device or a stale reading is a pressed
+  stop and never a release, and it holds the lockout's last reading. Toward inhibited is immediate; toward released
+  is debounced. A channel's polarity is never defaulted. The device is polled off the decision loop.
 - **One transaction.** The state and its ledger entry commit together. Publish after the commit;
   mark published after publishing; garbage-collect only published entries whose request key was deleted, past the retention counted from that delete (a sighting in storage voids it, #279).
 - **An ENVELOPE cause never clears while its watchdog keeps re-sending** (#291): only after `envelope.hold_ms` of

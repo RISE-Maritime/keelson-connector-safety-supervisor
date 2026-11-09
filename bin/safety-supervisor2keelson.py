@@ -32,7 +32,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from safety_supervisor import codec
 from safety_supervisor.actuation import LoggingActuator, MavlinkDisarmActuator, SlipwayLifecycleActuator, ThreadedActuator
-from safety_supervisor.inputs import MavlinkRcInputs, NoInputs, SimulatedInputs, TruthInputs
+from safety_supervisor.inputs import HardwareConfig, HardwareInputs, HardwarePoller, MavlinkRcInputs, NoInputs, SimulatedInputs, TruthInputs
 from safety_supervisor.policy import resolve
 from safety_supervisor.projection import Projections
 from safety_supervisor.retained import RetainedPoll
@@ -60,6 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
     sim.add_argument("--sim-mavlink", metavar="URL",
                      help="test profile: the SITL drone's key switch (an RC channel) over the supervisor's OWN MAVLink link, "
                           "e.g. tcp:127.0.0.1:5763 (the `sitl` extra)")
+    sim.add_argument("--hw-inputs", type=pathlib.Path, metavar="FILE",
+                     help="the real physical stop and lockout over Modbus TCP, any profile (config/hw-inputs.example.json)")
     p.add_argument("--truth-ttl-s", type=float, default=5.0, help="log when the truth record is silent this long (it never releases)")
     p.add_argument("--sim-mavlink-rc-channel", type=int, default=9, help="the drone's lockout key: this RC channel (default 9)")
     p.add_argument("--sim-mavlink-rc-high-us", type=int, default=1700, help="a pulse at or above this many µs is the key turned (default 1700)")
@@ -110,7 +112,15 @@ def main() -> int:
     truth = TruthInputs(ttl_ms=int(args.truth_ttl_s * 1000)) if args.sim_truth else None
     rc = (MavlinkRcInputs(args.sim_mavlink_rc_channel, args.sim_mavlink_rc_high_us, ttl_ms=int(args.truth_ttl_s * 1000))
           if args.sim_mavlink else None)
-    clocked = truth or rc  # the inputs whose `read` takes the monotonic now
+    hardware, poller = None, None
+    if args.hw_inputs:
+        try:
+            hardware = HardwareInputs(HardwareConfig.load(args.hw_inputs))
+        except (OSError, ValueError) as e:
+            log.error("refusing to start: --hw-inputs %s: %s", args.hw_inputs, e)
+            return 2
+        poller = HardwarePoller(hardware)
+    clocked = truth or rc or hardware  # the inputs whose `read` takes the monotonic now
     inputs = clocked or (SimulatedInputs(args.sim_inputs) if args.sim_inputs else NoInputs())
     legacy = args.legacy_observe
     if legacy and legacy != "slipway" and not legacy.startswith("mavlink:"):
@@ -135,6 +145,9 @@ def main() -> int:
         if refusal:
             log.error("refusing to start: %s", refusal)
             return 2
+    if policy is not None and policy.command_profile == "operational" and isinstance(inputs, NoInputs):
+        # An error and not a refusal: a supervisor that does not start is no STOP path at all.
+        log.error("the operational profile with no --hw-inputs: no physical stop or lockout is being read")
     log.warning("independence level L1: own process and Zenoh session; shares the router and the box (§3.4)")
 
     conf = create_zenoh_config(args.mode, args.connect, args.listen, zenoh_config=args.zenoh_config)
@@ -206,7 +219,14 @@ def main() -> int:
         sup = Supervisor(store=store, vessel_id=vessel, policy=policy, projections=projections,
                          publish_state=publish_state, publish_result=publish_result, actuator=actuator,
                          delete_request=delete_request)
-        sup.boot(inputs.read(), recover_operator=args.recover_locally)
+        def read_inputs():
+            return clocked.read(int(time.monotonic() * 1000)) if clocked is not None else inputs.read()
+
+        if poller is not None:
+            poller.start()
+            # Not a stop just because the first read has not finished. A device still silent is one.
+            poller.wait_first()
+        sup.boot(read_inputs(), recover_operator=args.recover_locally)
         log.info("booted: %s, fence %s/%s", keelson.payloads.SafetyState_pb2.SafetyState.State.Name(sup.state.state),
                  sup.state.fence.term[:8], sup.state.fence.generation)
 
@@ -251,9 +271,11 @@ def main() -> int:
         with declare_liveliness(session, realm, vessel, args.source_id, pubsub_subjects=["safety_state", "safety_processed_request"]), \
                 GracefulShutdown() as shutdown:
             last_hb = last_gc = time.monotonic()
+            # A real input is read as often as it is polled, not at the heartbeat of the simulated ones.
+            loop_wait_s = min(0.25, hardware.config.poll_ms / 1000) if hardware is not None else 0.25
             while not shutdown.is_requested():
                 try:
-                    kind, sample = events.get(timeout=0.25)
+                    kind, sample = events.get(timeout=loop_wait_s)
                 except queue.Empty:
                     kind = None
                 try:
@@ -297,7 +319,7 @@ def main() -> int:
                             actuator.vessel_latch(not sample)
                 except Exception:  # pylint: disable=broad-except
                     log.exception("could not handle a %s sample", kind)
-                sup.on_inputs(clocked.read(int(time.monotonic() * 1000)) if clocked is not None else inputs.read())
+                sup.on_inputs(read_inputs())
                 now = time.monotonic()
                 if now - last_hb >= args.heartbeat_s:
                     sup.heartbeat()
@@ -306,6 +328,8 @@ def main() -> int:
                     sup.gc(int(args.retention_days * 86_400_000))
                     last_gc = now
         poll.close()
+        if poller is not None:
+            poller.close()
         if isinstance(actuator, ThreadedActuator):
             actuator.close()  # before the session it calls through is closed
         if link is not None:

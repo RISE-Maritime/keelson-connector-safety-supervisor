@@ -13,6 +13,7 @@ ledger guarantees that a request never executes twice.
 >   vessel, `--actuator mavlink` force-disarms the SITL drone over the supervisor's own link. Each
 >   real interface (propulsion inhibit, safe state, local hold, shutdown, a physical output; MAVLink
 >   force-disarm on a real vehicle) is its own change, with its own safety review.
+> - **Inputs:** a real stop and lockout can be read over Modbus TCP (`--hw-inputs`), for a bench.
 > - **Never** run this against a real vessel or a shared network.
 
 ## What it does, and only that
@@ -47,8 +48,9 @@ Minimal, and simpler than what it protects (protocol inv. 15):
 - **The physical stop** adds `PHYSICAL_STOP`. While pressed, no RESET clears it. Releasing it
   makes it clearable, and then a RESET clears it.
 - **The local lockout** adds `LOCKOUT` and sets `local_lockout`. No remote role clears it.
-  Clearing it locally removes its own cause and re-arms nothing (I14). Both the stop and the lockout
-  are **simulated**, and the state says `lockout_simulated`. They come from one of three sources:
+  Clearing it locally removes its own cause and re-arms nothing (I14). Both are read from real hardware
+  with `--hw-inputs` (below). Otherwise they are **simulated**, and the state says `lockout_simulated`.
+  The simulated ones come from one of three sources:
   - a local file (`--sim-inputs`);
   - **Slipway's truth record** (`--sim-truth`), which carries her `set_lockout` switch (Slipway
     ADR-0140). In SIL the simulator is the hardware: this is what the `operational` profile's
@@ -65,6 +67,24 @@ Minimal, and simpler than what it protects (protocol inv. 15):
   ordinary key, so anyone who can publish on the bus can forge `lockout: false`. "No remote role
   clears it" (I14) therefore holds here only as far as the bus is trusted. The real guarantee is
   the operational profile's hardware inhibit.
+- **The real inputs** (`--hw-inputs FILE`, crowsnest-dev#277; `config/hw-inputs.example.json`) are one digital
+  channel each, read over Modbus TCP from a coil, a discrete input or a holding register: a safety PLC, a
+  remote I/O module, or a LabJack T-series on Ethernet. They are allowed in every profile, and
+  `lockout_simulated` is false.
+  - **Wire both normally closed**, with `released` set to the raw value of a healthy, released loop. A pulled
+    wire then reads as a press, or a turned key, with no fault logic at all. `released` has no default.
+  - **Toward inhibited is immediate.** Toward released takes `release_ms` of unbroken released samples.
+  - **Silence stops her**, unlike a simulated input. No good sample for `fault_ms`, or none yet, reads as a
+    pressed stop, with `physical-stop-input-fault` as the cause's source, and no RESET clears it until the input
+    reads released again. The lockout holds its last reading (nobody turned a key because a cable fell out). With
+    no reading since boot, it counts as engaged.
+  - The device is polled on its own thread, so the decision loop never waits on it. At start the supervisor waits
+    up to `boot_wait_ms` for a first reading, and a device still silent boots her STOPPED.
+  - **What this is not.** One channel per function, not a safety-rated input path. In the `operational` profile the
+    enforcement is the L5 hardware inhibit, which this only reports (COMMAND-ARCHITECTURE.md §3.3).
+  - **Modbus has no authentication.** Anyone who can reach the device can answer for it, so it needs its own network
+    segment. The `operational` profile with no `--hw-inputs` logs an error at start and still runs: a supervisor
+    that refused to start would be no STOP path at all.
 - **A legacy stop converges** (`--legacy-observe slipway` or `mavlink:<source_id>`). A direct
   `vehicle_lifecycle/v1 emergency_stop` is seen in the vehicle's own telemetry: her truth-record
   latch, or `vehicle_armed` going false. It latches `EXTERNAL_LEGACY_ESTOP`, with these rules:

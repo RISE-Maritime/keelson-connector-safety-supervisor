@@ -133,7 +133,8 @@ class Supervisor:
 
     def on_inputs(self, reading: Reading, publish: bool = True) -> None:
         now = self.now_ms()
-        st = model.apply_physical_stop(self.state, reading.physical_stop, now)
+        source = "physical-stop-input-fault" if reading.fault else "physical-stop"
+        st = model.apply_physical_stop(self.state, reading.physical_stop, now, source=source)
         st = model.apply_lockout(st, reading.lockout, now, simulated=reading.simulated)
         # An envelope watchdog that has stopped re-sending its STOP: its cause becomes clearable (#291).
         st = model.age_envelope(st, now, self.policy.envelope_hold_ms if self.policy is not None else 3000)
