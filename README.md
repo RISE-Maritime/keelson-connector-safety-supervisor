@@ -67,6 +67,15 @@ Minimal, and simpler than what it protects (protocol inv. 15):
   ordinary key, so anyone who can publish on the bus can forge `lockout: false`. "No remote role
   clears it" (I14) therefore holds here only as far as the bus is trusted. The real guarantee is
   the operational profile's hardware inhibit.
+- **The start warning** (`start_warning` in the policy; crowsnest-dev#377, keelson #428). A START_WARNING request sounds
+  the on-board warning for `hold_seconds`; SATISFIED then lasts `valid_seconds`, so it cannot be banked, and any departure
+  from CLEAR returns it to IDLE.
+  - It changes no `state`, adds no cause and mints no generation. Requests go through the ledger like any other. The
+    warning itself is not persisted: a restart comes back IDLE, which holds the next start.
+  - Who may ask is `start_warning.allow` / `deny`: people at a site by default, a process only if named.
+  - `device: "simulated"` is honoured only in the `test` profile, and is labelled `simulated`. It sounds nothing: a real
+    horn is its own change. No device reads NOT_FITTED in `test` and `legacy_single_operator`, and FAULT in `operational`
+    or with no adopted policy, which holds every start.
 - **The real inputs** (`--hw-inputs FILE`, crowsnest-dev#277; `config/hw-inputs.example.json`) are one digital
   channel each, read over Modbus TCP from a coil, a discrete input or a holding register: a safety PLC, a
   remote I/O module, or a LabJack T-series on Ethernet. They are allowed in every profile, and

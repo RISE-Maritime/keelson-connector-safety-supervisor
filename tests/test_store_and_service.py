@@ -26,7 +26,7 @@ class Bus:
     def __init__(self, fail_results=False):
         self.states, self.results, self.fail_results = [], [], fail_results
 
-    def state(self, st):
+    def state(self, st, _warning=None):
         self.states.append(st)
 
     def result(self, r):

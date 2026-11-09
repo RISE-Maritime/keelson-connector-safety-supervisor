@@ -33,6 +33,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from safety_supervisor import codec
 from safety_supervisor.actuation import LoggingActuator, MavlinkDisarmActuator, SlipwayLifecycleActuator, ThreadedActuator
 from safety_supervisor.inputs import HardwareConfig, HardwareInputs, HardwarePoller, MavlinkRcInputs, NoInputs, SimulatedInputs, TruthInputs
+from safety_supervisor.model import WarningConfig
 from safety_supervisor.policy import resolve
 from safety_supervisor.projection import Projections
 from safety_supervisor.retained import RetainedPoll
@@ -156,8 +157,10 @@ def main() -> int:
     with zenoh.open(conf) as session:
         state_pub = declare_publisher(session, keys["state"])
 
-        def publish_state(st):
-            state_pub.put(keelson.enclose(codec.state_to_pb(st, vessel_id=vessel, supervisor_id=args.supervisor_id,
+        warning_cfg = policy.warning_config() if policy is not None else WarningConfig()
+
+        def publish_state(st, warning):
+            state_pub.put(keelson.enclose(codec.state_to_pb(st, vessel_id=vessel, supervisor_id=args.supervisor_id, warning=warning, warning_cfg=warning_cfg,
                                                             now_ms=int(time.time() * 1000)).SerializeToString()))
 
         def publish_result(r):

@@ -30,6 +30,8 @@ before it is merged or run anywhere but the isolated tests.** Every commit messa
 - **A real input's silence stops her** (`--hw-inputs`, #277): an unreadable device or a stale reading is a pressed
   stop and never a release, and it holds the lockout's last reading. Toward inhibited is immediate; toward released
   is debounced. A channel's polarity is never defaulted. The device is polled off the decision loop.
+- **The start warning is beside the state, not in it** (#377): it mints no generation and is not persisted, so a
+  restart is IDLE, which holds. No device is FAULT in `operational`, never NOT_FITTED. A simulated horn is `test` only.
 - **One transaction.** The state and its ledger entry commit together. Publish after the commit;
   mark published after publishing; garbage-collect only published entries whose request key was deleted, past the retention counted from that delete (a sighting in storage voids it, #279).
 - **An ENVELOPE cause never clears while its watchdog keeps re-sending** (#291): only after `envelope.hold_ms` of

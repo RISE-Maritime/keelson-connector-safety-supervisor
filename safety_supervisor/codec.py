@@ -8,7 +8,7 @@ from google.protobuf.timestamp_pb2 import Timestamp
 from keelson.payloads.Fence_pb2 import Fence as FencePb
 from keelson.payloads.SafetyState_pb2 import EmergencyRequest, SafetyCause, SafetyRequestResult, SafetyState
 
-from .model import Cause, Fence, Request, Result, State
+from .model import Cause, Fence, Request, Result, State, WarningConfig, WarningState
 
 
 def _ts(ms: int | None) -> Timestamp | None:
@@ -38,7 +38,19 @@ def cause_to_pb(c: Cause) -> SafetyCause:
     return pb
 
 
-def state_to_pb(state: State, *, vessel_id: str, supervisor_id: str, now_ms: int) -> SafetyState:
+def warning_to_pb(pb, w: WarningState, cfg: WarningConfig) -> None:
+    """Fill `safety_state.start_warning`. `started_at` only while it is running: absent otherwise."""
+    pb.state = w.state
+    pb.hold_seconds = cfg.hold_ms // 1000
+    pb.valid_seconds = cfg.valid_ms // 1000
+    pb.requested_by = w.requested_by
+    pb.simulated = cfg.simulated
+    if w.started_at_ms is not None:
+        pb.started_at.CopyFrom(_ts(w.started_at_ms))
+
+
+def state_to_pb(state: State, *, vessel_id: str, supervisor_id: str, now_ms: int, warning: WarningState | None = None,
+                warning_cfg: WarningConfig | None = None) -> SafetyState:
     pb = SafetyState(vessel_id=vessel_id, supervisor_id=supervisor_id, state=state.state,
                      local_lockout=state.local_lockout, lockout_simulated=state.lockout_simulated,
                      who=state.who, why=state.why)
@@ -50,6 +62,8 @@ def state_to_pb(state: State, *, vessel_id: str, supervisor_id: str, now_ms: int
     safe = [c.safe_state_name for c in state.causes if c.safe_state_name]
     if safe:
         pb.safe_state_name = safe[0]
+    if warning is not None and warning_cfg is not None:
+        warning_to_pb(pb.start_warning, warning, warning_cfg)
     return pb
 
 

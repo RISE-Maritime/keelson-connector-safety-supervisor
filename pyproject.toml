@@ -11,10 +11,10 @@ license = { text = "Apache-2.0" }
 dependencies = [
     # EXACT pin, never a path or a range. The types (EmergencyRequest, SafetyState,
     # SafetyRequestResult) exist only on keelson PR #332, unmerged. This is keelson's
-    # `experimental` channel: 0.6.0-experimental.21 (PyPI's spelling 0.6.0.dev21) = dev + the
+    # `experimental` channel: 0.6.0-experimental.25 (PyPI's spelling 0.6.0.dev25) = dev + the
     # open PRs, #332 at d7d9512, tracked by crowsnest-dev #82. An experimental tree stops existing
     # the moment any of its PRs lands, so repin to the -pre.N that carries #332 once it merges.
-    "keelson==0.6.0.dev21",
+    "keelson==0.6.0.dev25",
 ]
 
 [project.optional-dependencies]

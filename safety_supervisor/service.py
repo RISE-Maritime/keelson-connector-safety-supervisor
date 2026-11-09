@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterable
 
 from . import model
 from .inputs import Reading
-from .model import Request, Result, State
+from .model import Request, Result, State, WarningConfig
 
 log = logging.getLogger(__name__)
 
@@ -27,10 +27,14 @@ def wall_ms() -> int:
     return int(time.time() * 1000)
 
 
+def monotonic_ms() -> int:
+    return int(time.monotonic() * 1000)
+
+
 class Supervisor:
     def __init__(self, *, store, vessel_id: str, policy, projections, publish_state: Callable[[State], None],
                  publish_result: Callable[[Result], None], actuator, now_ms: Callable[[], int] = wall_ms,
-                 delete_request: Callable[[str], None] | None = None):
+                 delete_request: Callable[[str], None] | None = None, mono_ms: Callable[[], int] = monotonic_ms):
         self.store = store
         self.vessel_id = vessel_id
         self.policy = policy
@@ -43,6 +47,9 @@ class Supervisor:
         # failure. None deletes nothing, so nothing is ever marked deleted and no ledger row is collected.
         self._delete_request = delete_request
         self.state: State | None = None
+        self.mono_ms = mono_ms
+        self.warning_cfg = policy.warning_config() if policy is not None else WarningConfig()
+        self.warning = model.idle_warning(self.warning_cfg)
 
     # ------------------------------------------------------------------ boot
 
@@ -66,7 +73,7 @@ class Supervisor:
         for result in self.store.unpublished():
             self._send_result(result)
         self._actuate()
-        self._publish_state(self.state)
+        self._publish()
         return self.state
 
     # ------------------------------------------------------------------ requests
@@ -77,6 +84,8 @@ class Supervisor:
             # The second sighting of a request IS the first answer (no DUPLICATE outcome).
             self._send_result(seen)
             return seen
+        if req.command == model.C.EMERGENCY_COMMAND_START_WARNING:
+            return self._handle_warning(req)
         auth = self.projections.authorise(req, self.policy)
         new_state, result = model.apply_request(self.state, req, auth, self.now_ms(), self.vessel_id)
         if result.outcome == model.O.SAFETY_REQUEST_OUTCOME_REFUSED_MALFORMED and not req.request_id:
@@ -88,10 +97,27 @@ class Supervisor:
         self.state = new_state
         if changed:
             self._actuate()
-            self._publish_state(self.state)
+            self._publish()
         self._send_result(result)
         log.info("%s %s from %s → %s", req.request_id, model.C.Name(req.command) if req.command in (1, 2) else req.command,
                  req.controller_id, model.O.Name(result.outcome))
+        return result
+
+    def _handle_warning(self, req: Request) -> Result:
+        may_warn = self.policy is not None and self.policy.may_warn(req.controller_id)
+        warning, result = model.request_warning(self.warning, self.state, req, may_warn, self.warning_cfg, self.now_ms(),
+                                                self.mono_ms(), self.vessel_id)
+        if result.outcome == model.O.SAFETY_REQUEST_OUTCOME_REFUSED_MALFORMED and not req.request_id:
+            log.error("malformed request with no request_id ignored: %s", result.detail)
+            return result
+        self.store.commit(self.state, result)  # the ledger entry; the warning itself is not persisted
+        if warning is not self.warning:
+            self.warning = warning
+            log.warning("START WARNING SOUNDING for %d s, asked by %s%s", self.warning_cfg.hold_ms // 1000, req.controller_id,
+                        " (simulated: nothing sounded)" if self.warning_cfg.simulated else "")
+            self._publish()
+        self._send_result(result)
+        log.info("%s START_WARNING from %s → %s", req.request_id, req.controller_id, model.O.Name(result.outcome))
         return result
 
     def handle_retained(self, req: Request) -> Result | None:
@@ -139,12 +165,14 @@ class Supervisor:
         # An envelope watchdog that has stopped re-sending its STOP: its cause becomes clearable (#291).
         st = model.age_envelope(st, now, self.policy.envelope_hold_ms if self.policy is not None else 3000)
         if st is self.state:
+            if publish:
+                self._tick_warning()
             return
         self.store.commit(st)
         self.state = st
         if publish:
             self._actuate()
-            self._publish_state(self.state)
+            self._publish()
 
     def on_vehicle_stopped(self, source: str, stopped: bool) -> None:
         """The legacy-stop observer. Only an EDGE into stopped latches: a vessel that is simply
@@ -164,13 +192,13 @@ class Supervisor:
                 self.store.commit(st)
                 self.state = st
                 self._actuate()
-                self._publish_state(self.state)
+                self._publish()
         if was != stopped:
             self.store.put_json(key, {"stopped": stopped})
 
     def heartbeat(self) -> None:
         self._actuate()  # an actuator that did not land retries here
-        self._publish_state(self.state)
+        self._publish()
         self.sweep_deletes()  # a request key whose delete failed retries here
 
     def gc(self, retention_ms: int) -> int:
@@ -184,6 +212,17 @@ class Supervisor:
         return self.store.gc(self.now_ms(), retention_ms)
 
     # ------------------------------------------------------------------ internals
+
+    def _tick_warning(self) -> None:
+        """Publish only when the warning moved: this runs on every wake of the decision loop."""
+        ticked = model.tick_warning(self.warning, self.state, self.warning_cfg, self.mono_ms())
+        if ticked is not self.warning:
+            self.warning = ticked
+            self._publish_state(self.state, self.warning)
+
+    def _publish(self) -> None:
+        self.warning = model.tick_warning(self.warning, self.state, self.warning_cfg, self.mono_ms())
+        self._publish_state(self.state, self.warning)
 
     def _send_result(self, result: Result) -> None:
         """Publish, mark published, THEN delete the request key: never before the result is out (protocol

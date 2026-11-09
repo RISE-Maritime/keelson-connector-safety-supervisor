@@ -27,7 +27,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .model import PROFILES
+from .model import PROFILES, WarningConfig
 
 log = logging.getLogger(__name__)
 
@@ -47,9 +47,27 @@ class Policy:
     envelope_trippers: tuple[str, ...] = ()
     envelope_hold_ms: int = 3000
     envelope_watchdog_source_id: str = ""
+    # The on-board start warning (crowsnest-dev#377). LAST, so positional construction keeps its meaning.
+    warn_allow: tuple[str, ...] = ("*@*",)
+    warn_deny: tuple[str, ...] = ()
+    warning_device: str = "none"
+    warning_hold_ms: int = 10_000
+    warning_valid_ms: int = 60_000
 
     def is_envelope_tripper(self, controller_id: str) -> bool:
         return any(fnmatch.fnmatchcase(controller_id, p) for p in self.envelope_trippers)
+
+    def may_warn(self, controller_id: str) -> bool:
+        """START_WARNING: people at a site by default, a process only if the policy names it."""
+        if any(fnmatch.fnmatchcase(controller_id, p) for p in self.warn_deny):
+            return False
+        return any(fnmatch.fnmatchcase(controller_id, p) for p in self.warn_allow)
+
+    def warning_config(self) -> WarningConfig:
+        """A simulated horn is honoured only in the test profile, like every simulated input."""
+        fitted = self.warning_device == "simulated" and self.command_profile == "test"
+        return WarningConfig(fitted=fitted, simulated=fitted, profile=self.command_profile,
+                             hold_ms=self.warning_hold_ms, valid_ms=self.warning_valid_ms)
 
     def may_trip(self, controller_id: str) -> bool:
         if any(fnmatch.fnmatchcase(controller_id, p) for p in self.trip_deny):
@@ -71,6 +89,13 @@ def parse(d: dict) -> Policy:
     hold = int(envelope.get("hold_ms", 3000))
     if hold <= 0:
         raise ValueError("envelope.hold_ms must be positive: a cause that is clearable at once is no hold")
+    warning = d.get("start_warning") or {}
+    device = warning.get("device", "none")
+    if device not in ("none", "simulated"):
+        raise ValueError(f"start_warning.device must be none or simulated, got {device!r}")
+    hold_s, valid_s = warning.get("hold_seconds", 10), warning.get("valid_seconds", 60)
+    if not isinstance(hold_s, int) or not isinstance(valid_s, int) or hold_s <= 0 or valid_s <= 0:
+        raise ValueError("start_warning.hold_seconds and valid_seconds must be positive whole numbers")
     if profile == "operational" and not manager.get("issuer_id"):
         raise ValueError("the operational profile names the authorised manager (manager.issuer_id)")
     return Policy(
@@ -85,6 +110,11 @@ def parse(d: dict) -> Policy:
         envelope_trippers=tuple(envelope.get("trippers", [])),
         envelope_hold_ms=hold,
         envelope_watchdog_source_id=str(envelope.get("watchdog_source_id", "")),
+        warn_allow=tuple(warning.get("allow", ["*@*"])),
+        warn_deny=tuple(warning.get("deny", [])),
+        warning_device=device,
+        warning_hold_ms=hold_s * 1000,
+        warning_valid_ms=valid_s * 1000,
     )
 
 

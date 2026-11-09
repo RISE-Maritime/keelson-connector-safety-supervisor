@@ -19,12 +19,14 @@ from keelson.payloads.SafetyState_pb2 import (
     SafetyCause,
     SafetyRequestOutcome,
     SafetyState,
+    StartWarning,
 )
 
 T = SafetyCause.Type
 S = SafetyState.State
 O = SafetyRequestOutcome  # noqa: E741 - the enum's alias, like T, S and C
 C = EmergencyCommand
+W = StartWarning.State
 
 # Causes that latch STOPPED (SafetyState.proto).
 STOP_CLASS = frozenset(
@@ -191,8 +193,8 @@ def malformed(req: Request, vessel_id: str) -> str | None:
         return "request_id must be one key chunk"
     if req.vessel_id != vessel_id:
         return f"request names vessel {req.vessel_id!r}, this supervisor is {vessel_id!r}"
-    if req.command not in (C.EMERGENCY_COMMAND_STOP, C.EMERGENCY_COMMAND_RESET):
-        return "command must be STOP or RESET"
+    if req.command not in (C.EMERGENCY_COMMAND_STOP, C.EMERGENCY_COMMAND_RESET, C.EMERGENCY_COMMAND_START_WARNING):
+        return "command must be STOP, RESET or START_WARNING"
     if not req.controller_id:
         return "controller_id is required"
     return None
@@ -237,6 +239,78 @@ def apply_request(state: State, req: Request, auth: Authorisation, now_ms: int, 
     st = _with_causes(state, (), now_ms, who=req.controller_id, why=req.reason or "RESET")
     # A RESET re-arms nothing: CLEAR only makes arming possible again; nothing here arms.
     return answer(st, O.SAFETY_REQUEST_OUTCOME_ACCEPTED)
+
+
+# ---------------------------------------------------------------------------- the start warning
+
+
+@dataclass(frozen=True)
+class WarningConfig:
+    """The supervisor's own configuration of the on-board warning (policy.warning_config)."""
+
+    fitted: bool = False  # a working device exists
+    simulated: bool = False
+    profile: str | None = None  # None: no adopted policy
+    hold_ms: int = 10_000
+    valid_ms: int = 60_000
+
+
+@dataclass(frozen=True)
+class WarningState:
+    """The on-board warning of impending remote operation (SARUMS A3.24; keelson #428).
+
+    BESIDE THE STATE, NOT IN IT: it changes no `state`, adds no cause and mints no generation. Not
+    persisted either: a restart comes back IDLE, which holds the next start."""
+
+    state: int
+    requested_by: str = ""
+    started_at_ms: int | None = None  # wall clock, for reporting
+    since_mono_ms: int = 0  # when the current SOUNDING or SATISFIED began: durations are measured on this
+
+
+def idle_warning(cfg: WarningConfig) -> WarningState:
+    """What a warning at rest reads. No device is NOT_FITTED only where a vessel may go without one: in the
+    operational profile, or with no adopted policy, it is FAULT, which holds every start."""
+    if cfg.fitted:
+        return WarningState(W.START_WARNING_STATE_IDLE)
+    if cfg.profile in ("test", "legacy_single_operator"):
+        return WarningState(W.START_WARNING_STATE_NOT_FITTED)
+    return WarningState(W.START_WARNING_STATE_FAULT)
+
+
+def tick_warning(w: WarningState, state: State, cfg: WarningConfig, mono_ms: int) -> WarningState:
+    """The warning, as time and the safety state have moved it. Any departure from CLEAR ends it, and
+    SATISFIED lasts `valid_ms`, so a warning cannot be banked."""
+    if w.state not in (W.START_WARNING_STATE_SOUNDING, W.START_WARNING_STATE_SATISFIED):
+        return w
+    if state.state != S.SAFETY_STATE_CLEAR or state.local_lockout:
+        return idle_warning(cfg)
+    held = mono_ms - w.since_mono_ms
+    if w.state == W.START_WARNING_STATE_SOUNDING:
+        return replace(w, state=W.START_WARNING_STATE_SATISFIED, since_mono_ms=mono_ms) if held >= cfg.hold_ms else w
+    return idle_warning(cfg) if held >= cfg.valid_ms else w
+
+
+def request_warning(w: WarningState, state: State, req: Request, may_warn: bool, cfg: WarningConfig, now_ms: int, mono_ms: int,
+                    vessel_id: str) -> tuple[WarningState, Result]:
+    """Decide one START_WARNING. The ledger (service.py) guarantees it runs at most once per request_id. A
+    request is not a warning: only `safety_state.start_warning` says one was given."""
+
+    def answer(warning: WarningState, outcome: int, detail: str = "") -> tuple[WarningState, Result]:
+        return warning, Result(req.request_id, req.command, outcome, state.fence, now_ms, (), detail)
+
+    bad = malformed(req, vessel_id)
+    if bad:
+        return answer(w, O.SAFETY_REQUEST_OUTCOME_REFUSED_MALFORMED, bad)
+    if not may_warn:
+        return answer(w, O.SAFETY_REQUEST_OUTCOME_REFUSED_UNAUTHORISED, "not a START_WARNING principal")
+    if state.state != S.SAFETY_STATE_CLEAR or state.local_lockout:
+        return answer(w, O.SAFETY_REQUEST_OUTCOME_REFUSED_NOT_CLEAR, "the vessel is not CLEAR")
+    if w.state in (W.START_WARNING_STATE_NOT_FITTED, W.START_WARNING_STATE_FAULT):
+        return answer(w, O.SAFETY_REQUEST_OUTCOME_REFUSED_NO_WARNING_DEVICE, "this vessel has no working warning device")
+    if w.state == W.START_WARNING_STATE_SOUNDING:
+        return answer(w, O.SAFETY_REQUEST_OUTCOME_ACCEPTED, "already sounding")  # one warning, however many ask
+    return answer(WarningState(W.START_WARNING_STATE_SOUNDING, req.controller_id, now_ms, mono_ms), O.SAFETY_REQUEST_OUTCOME_ACCEPTED)
 
 
 # ---------------------------------------------------------------------------- inputs

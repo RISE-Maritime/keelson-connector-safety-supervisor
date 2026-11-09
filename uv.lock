@@ -47,7 +47,7 @@ wheels = [
 
 [[package]]
 name = "keelson"
-version = "0.6.0.dev21"
+version = "0.6.0.dev25"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "eclipse-zenoh" },
@@ -56,7 +56,7 @@ dependencies = [
     { name = "pyyaml" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8a/e1/02ddf1dfaa46bb559b79d065079ad59979f569b3b7fefabc91ab42384ac1/keelson-0.6.0.dev21-py3-none-any.whl", hash = "sha256:0409856c49e1be1b15cad52d9caac902bc43f0fca0e0d769a4b8e96ad31d0bc6", size = 374928, upload-time = "2026-11-05T05:28:04.323Z" },
+    { url = "https://files.pythonhosted.org/packages/f6/6f/db1ef1544c43348833f9be8b73d8297b6873a0d8366ce84e0371d45c71c6/keelson-0.6.0.dev25-py3-none-any.whl", hash = "sha256:2d0ad61d6a3684a737d1ae6b4881444e3fd8fac9de1ace9c32cccdb9aaa24875", size = 414423, upload-time = "2026-11-09T15:52:34.373Z" },
 ]
 
 [[package]]
@@ -79,7 +79,7 @@ sitl = [
 
 [package.metadata]
 requires-dist = [
-    { name = "keelson", specifier = "==0.6.0.dev21" },
+    { name = "keelson", specifier = "==0.6.0.dev25" },
     { name = "pymavlink", marker = "extra == 'dev'", specifier = "==2.4.47" },
     { name = "pymavlink", marker = "extra == 'sitl'", specifier = "==2.4.47" },
     { name = "pytest", marker = "extra == 'dev'", specifier = "==8.3.4" },

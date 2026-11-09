@@ -19,5 +19,14 @@
     ],
     "hold_ms": 3000,
     "watchdog_source_id": "envelope-watchdog"
+  },
+  "start_warning": {
+    "allow": [
+      "*@*"
+    ],
+    "deny": [],
+    "device": "simulated",
+    "hold_seconds": 10,
+    "valid_seconds": 60
   }
 }
