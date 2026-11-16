@@ -70,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="observe legacy stops: Slipway's truth-record latch, or a MAVLink vehicle_armed source")
     p.add_argument("--actuator", choices=["logging", "slipway", "mavlink"], default="logging",
                    help="safety actuation (default: logging only; mavlink = force-disarm over the --sim-mavlink link)")
-    p.add_argument("--slipway-responder-id", default="sim", help="the Slipway vessel's vehicle_lifecycle/v1 responder (default sim)")
+    p.add_argument("--slipway-responder-id", default="slipway", help="the Slipway vessel's vehicle_lifecycle/v1 responder (default slipway)")
     p.add_argument("--actuator-timeout-s", type=float, default=2.0, help="timeout of one actuator call")
     p.add_argument("--heartbeat-s", type=float, default=5.0, help="safety_state heartbeat period (default 5 s)")
     p.add_argument("--retention-days", type=float, default=0.0,

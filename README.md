@@ -226,7 +226,7 @@ safety-supervisor2keelson -r rise -e <vessel> --state-dir ./state \
   --sim-inputs ./inputs.json --connect tcp/<router>:7447
 
 # against a Slipway vessel (test profile): her lockout switch, her stop latch, and her emergency_stop
-safety-supervisor2keelson -r rise -e slipway-usv-alpha --state-dir ./state --policy config/policy.json \
+safety-supervisor2keelson -r rise -e sim-usv-alpha --state-dir ./state --policy config/policy.json \
   --sim-truth --legacy-observe slipway --actuator slipway --connect tcp/<local router>:7447
 
 # against the SITL drone (test profile; pip install '.[sitl]'): her RC9 key switch and a forced disarm,

@@ -227,7 +227,7 @@ class FakeKernel:
             self.arms += 1
             op.reply_ok(ArmResponse(result=CommandResult.COMMAND_RESULT_ACCEPTED))
 
-        serve_rpc(session, base_path=REALM, entity_id=V, responder_id="sim", interface="vehicle_lifecycle", version="v1",
+        serve_rpc(session, base_path=REALM, entity_id=V, responder_id="slipway", interface="vehicle_lifecycle", version="v1",
                   handlers={"emergency_stop": emergency_stop, "arm": arm}, declare_liveliness=False)
 
     def truth(self, *, estop=False, lockout=False):
