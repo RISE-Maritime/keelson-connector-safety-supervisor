@@ -7,9 +7,9 @@ before it is merged or run anywhere but the isolated tests.** Every commit messa
 ## Rules that must not be broken
 
 - **Minimal.** STOP, RESET, the physical stop, the lockout, the state and the ledger. Nothing else.
-  The operational fallbacks (ROC lost, a stale joystick, a stale navigator, a lapsed lease) belong
+  The operational fallbacks (ROC lost, a stale joystick, a stale ANS, a lapsed lease) belong
   to the gate, not here.
-- **Independent.** Its own Zenoh session and its own store. It never reads the gate, the navigator
+- **Independent.** Its own Zenoh session and its own store. It never reads the gate, the ANS
   or mavlink2keelson, and it never asks the authority manager or a station who may STOP or RESET.
   In the `test` profile it may hold its OWN MAVLink link to a SITL autopilot (`--sim-mavlink`): a
   second link to the vehicle, never mavlink2keelson (crowsnest-dev#268).

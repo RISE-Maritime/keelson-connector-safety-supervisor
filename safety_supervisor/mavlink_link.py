@@ -5,7 +5,7 @@ stop is an output the supervisor drives itself. On the SITL drone there is neith
 stands in for both: the drone's RC9 is the key (high = locked out), and a forced disarm over this
 same link is the stop. It is a second, independent link to the autopilot -- its own serial port on
 the SITL (5763), its own system id -- and it never goes through mavlink2keelson, which is why it does
-not break "never reads the gate, the navigator or mavlink2keelson".
+not break "never reads the gate, the ANS or mavlink2keelson".
 
 One thread owns the connection and only REPORTS: `on_rc(pwm_us)` and `on_armed(armed)` are the
 bin's enqueue callbacks, and the decision loop decides. `force_disarm` is called from the actuator's

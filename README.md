@@ -137,7 +137,7 @@ Minimal, and simpler than what it protects (protocol inv. 15):
 
   A restart starts not-live until the feed is heard again. A STOP never reads it (I7′).
 
-It **never** reads the gate, the navigator or mavlink2keelson, and it never asks the authority
+It **never** reads the gate, the ANS or mavlink2keelson, and it never asks the authority
 manager or a station anything. Its own MAVLink link to a SITL autopilot (test profile only) is not
 mavlink2keelson: it is a second, independent link to the vehicle, standing in for the key and the
 output a real vessel wires into the supervisor.
@@ -198,7 +198,7 @@ RESET is refused.
 ## Envelope trips (crowsnest-dev#291)
 
 A separate **envelope watchdog** (`keelson-processor-envelope-watchdog`) watches her hard limits from her
-own sensors, never the navigator or `envelope_exceedance`, and sends an `EmergencyRequest` STOP like any
+own sensors, never the ANS or `envelope_exceedance`, and sends an `EmergencyRequest` STOP like any
 other tripper. The supervisor itself measures nothing, so it stays simpler than what it protects.
 `EmergencyRequest` has no cause field: the cause follows from who sent it.
 

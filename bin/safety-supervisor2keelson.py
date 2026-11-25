@@ -4,7 +4,7 @@
 Its OWN Zenoh session and its own store; it needs nothing else alive for a STOP to land. It reads
 `emergency_request`, `command_assignment` (the master, operational profile), the conn lease
 (test / legacy profiles) and the authority manager's liveliness; it writes `safety_state` and
-`safety_processed_request`. It never reads the gate, the navigator or mavlink2keelson. In the test
+`safety_processed_request`. It never reads the gate, the ANS or mavlink2keelson. In the test
 profile it may hold its OWN MAVLink link to a SITL autopilot (`--sim-mavlink`): the drone's key switch
 and its stop, standing in for a key and an output wired into the supervisor (crowsnest-dev#268).
 
